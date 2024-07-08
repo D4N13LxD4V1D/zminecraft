@@ -1,13 +1,8 @@
 .{
-    .name = "minecraft",
+    .name = "zminecraft",
     .version = "0.0.0",
 
-    .dependencies = .{
-        .glfw = .{
-            .url = "https://github.com/slimsag/glfw/archive/refs/heads/master.tar.gz",
-            .hash = "1220c15e66c13f9633fcfd50b5ed265f74f2950c98b1f1defd66298fa027765e0190",
-        },
-    },
+    .dependencies = .{},
 
     .paths = .{
         "build.zig",

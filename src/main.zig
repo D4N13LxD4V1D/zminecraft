@@ -12,10 +12,6 @@ pub fn main() !void {
     }
     defer c.glfwTerminate();
 
-    var extensionCount: c_uint = 0;
-    _ = c.vkEnumerateInstanceExtensionProperties(null, &extensionCount, null);
-    std.log.info("Vulkan extension count: {}\n", .{extensionCount});
-
     const window = c.glfwCreateWindow(800, 600, "Hello, World", null, null) orelse {
         std.log.err("Failed to create GLFW window: {}\n", .{c.glfwGetError(null)});
         std.process.exit(1);

@@ -11,10 +11,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    exe.root_module.linkLibrary(b.dependency("glfw", .{
-        .target = target,
-        .optimize = optimize,
-    }).artifact("glfw"));
+    exe.linkSystemLibrary("glfw3");
+    exe.linkSystemLibrary("vulkan");
 
     b.installArtifact(exe);
 
