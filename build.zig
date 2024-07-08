@@ -4,6 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const ecs = b.addModule("ecs", .{ .root_source_file = b.path("src/ecs/root.zig"), .target = target, .optimize = optimize });
+    ecs.linkSystemLibrary("sqlite3", .{});
+
+    const renderer = b.addModule("renderer", .{ .root_source_file = b.path("src/renderer/root.zig"), .target = target, .optimize = optimize });
+    renderer.linkSystemLibrary("glfw3", .{});
+    renderer.linkSystemLibrary("vulkan", .{});
+
     const exe = b.addExecutable(.{
         .name = "zminecraft",
         .root_source_file = b.path("src/main.zig"),
@@ -11,8 +18,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    exe.linkSystemLibrary("glfw3");
-    exe.linkSystemLibrary("vulkan");
+    exe.root_module.addImport("ecs", ecs);
+    exe.root_module.addImport("renderer", renderer);
 
     b.installArtifact(exe);
 
