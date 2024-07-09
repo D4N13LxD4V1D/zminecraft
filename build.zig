@@ -5,11 +5,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const ecs = b.addModule("ecs", .{ .root_source_file = b.path("src/ecs/root.zig"), .target = target, .optimize = optimize });
-    ecs.linkSystemLibrary("sqlite3", .{});
+    ecs.linkSystemLibrary("sqlite3", .{ .preferred_link_mode = .static });
 
     const renderer = b.addModule("renderer", .{ .root_source_file = b.path("src/renderer/root.zig"), .target = target, .optimize = optimize });
-    renderer.linkSystemLibrary("glfw3", .{});
-    renderer.linkSystemLibrary("vulkan", .{});
+    renderer.linkSystemLibrary("vulkan", .{ .preferred_link_mode = .static });
+    renderer.linkSystemLibrary("glfw3", .{ .preferred_link_mode = .static });
 
     const exe = b.addExecutable(.{
         .name = "zminecraft",
