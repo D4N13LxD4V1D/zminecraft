@@ -8,9 +8,10 @@ const HEIGHT = 600;
 const enableValidationLayers = std.debug.runtime_safety;
 const validationLayers = [_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
 
-var instance: c.VkInstance = undefined;
-var debugMessenger: c.VkDebugUtilsMessengerEXT = undefined;
-var physicalDevice: c.VkPhysicalDevice = undefined;
+instance: c.VkInstance = undefined,
+debugMessenger: c.VkDebugUtilsMessengerEXT = undefined,
+physicalDevice: c.VkPhysicalDevice = undefined,
+device: c.VkDevice = undefined,
 
 const QueueFamilyIndices = struct {
     graphicsFamily: ?u32 = null,
@@ -27,7 +28,8 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const window = c.glfwCreateWindow(WIDTH, HEIGHT, "zminecraft", null, null) orelse return error.GlfwWindowCreationFailed;
     defer c.glfwDestroyWindow(window);
 
-    try initVulkan(allocator, window);
+    var self: @This() = .{};
+    try self.initVulkan(allocator, window);
 
     c.glfwMakeContextCurrent(window);
     while (c.glfwWindowShouldClose(window) == c.GLFW_FALSE) {
@@ -35,24 +37,24 @@ pub fn run(allocator: std.mem.Allocator) !void {
         c.glfwPollEvents();
     }
 
-    cleanup();
+    self.cleanup();
 }
 
-fn cleanup() void {
+fn cleanup(self: *@This()) void {
     if (enableValidationLayers)
-        DestroyDebugUtilsMessengerEXT(null);
+        DestroyDebugUtilsMessengerEXT(self.instance, self.debugMessenger, null);
 
-    c.vkDestroyInstance(instance, null);
+    c.vkDestroyInstance(self.instance, null);
 }
 
-fn initVulkan(allocator: std.mem.Allocator, window: *c.GLFWwindow) !void {
-    try createInstance(allocator);
-    try setupDebugMessenger();
-    try pickPhysicalDevice(allocator);
+fn initVulkan(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindow) !void {
+    try self.createInstance(allocator);
+    try self.setupDebugMessenger();
+    try self.pickPhysicalDevice(allocator);
     _ = window;
 }
 
-fn createInstance(allocator: std.mem.Allocator) !void {
+fn createInstance(self: *@This(), allocator: std.mem.Allocator) !void {
     if (enableValidationLayers and !(try checkValidationLayerSupport(allocator)))
         return error.ValidationLayerRequestedButNotAvailable;
 
@@ -83,7 +85,7 @@ fn createInstance(allocator: std.mem.Allocator) !void {
         .flags = if (builtin.os.tag == .macos) c.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR else 0,
     };
 
-    if (c.vkCreateInstance(&createInfo, null, &instance) != c.VK_SUCCESS) return error.VulkanInstanceCreationFailed;
+    if (c.vkCreateInstance(&createInfo, null, &self.instance) != c.VK_SUCCESS) return error.VulkanInstanceCreationFailed;
 }
 
 fn checkValidationLayerSupport(allocator: std.mem.Allocator) !bool {
@@ -128,13 +130,13 @@ fn getRequiredExtensions(allocator: std.mem.Allocator) ![][*]const u8 {
     return extensions.toOwnedSlice();
 }
 
-fn setupDebugMessenger() !void {
+fn setupDebugMessenger(self: *@This()) !void {
     if (!enableValidationLayers) return;
 
     var createInfo: c.VkDebugUtilsMessengerCreateInfoEXT = undefined;
     populateDebugMessengerCreateInfo(&createInfo);
 
-    if (CreateDebugUtilsMessengerEXT(&createInfo, null, &debugMessenger) != c.VK_SUCCESS) return error.VulkanDebugMessengerCreationFailed;
+    if (CreateDebugUtilsMessengerEXT(self.instance, &createInfo, null, &self.debugMessenger) != c.VK_SUCCESS) return error.VulkanDebugMessengerCreationFailed;
 }
 
 fn populateDebugMessengerCreateInfo(createInfo: *c.VkDebugUtilsMessengerCreateInfoEXT) void {
@@ -167,26 +169,26 @@ fn debugCallback(
     return c.VK_FALSE;
 }
 
-fn CreateDebugUtilsMessengerEXT(pCreateInfo: *const c.VkDebugUtilsMessengerCreateInfoEXT, pAllocator: ?*const c.VkAllocationCallbacks, pDebugMessenger: *c.VkDebugUtilsMessengerEXT) c.VkResult {
+fn CreateDebugUtilsMessengerEXT(instance: c.VkInstance, pCreateInfo: *const c.VkDebugUtilsMessengerCreateInfoEXT, pAllocator: ?*const c.VkAllocationCallbacks, pDebugMessenger: *c.VkDebugUtilsMessengerEXT) c.VkResult {
     const func: c.PFN_vkCreateDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT") orelse return c.VK_ERROR_EXTENSION_NOT_PRESENT);
     return func.?(instance, pCreateInfo, pAllocator, pDebugMessenger);
 }
 
-fn DestroyDebugUtilsMessengerEXT(pAllocator: ?*const c.VkAllocationCallbacks) void {
+fn DestroyDebugUtilsMessengerEXT(instance: c.VkInstance, debugMessenger: c.VkDebugUtilsMessengerEXT, pAllocator: ?*const c.VkAllocationCallbacks) void {
     const func: c.PFN_vkDestroyDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT") orelse unreachable);
     return func.?(instance, debugMessenger, pAllocator);
 }
 
-fn pickPhysicalDevice(allocator: std.mem.Allocator) !void {
+fn pickPhysicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
     var physicalDeviceCount: u32 = undefined;
-    if (c.vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, null) != c.VK_SUCCESS) return error.VulkanPhysicalDeviceEnumerationFailed;
+    if (c.vkEnumeratePhysicalDevices(self.instance, &physicalDeviceCount, null) != c.VK_SUCCESS) return error.VulkanPhysicalDeviceEnumerationFailed;
     if (physicalDeviceCount == 0) return error.VulkanNoPhysicalDevicesFound;
 
     const physicalDevices = try allocator.alloc(c.VkPhysicalDevice, physicalDeviceCount);
     defer allocator.free(physicalDevices);
-    if (c.vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, physicalDevices.ptr) != c.VK_SUCCESS) return error.VulkanPhysicalDeviceEnumerationFailed;
+    if (c.vkEnumeratePhysicalDevices(self.instance, &physicalDeviceCount, physicalDevices.ptr) != c.VK_SUCCESS) return error.VulkanPhysicalDeviceEnumerationFailed;
 
-    physicalDevice = for (physicalDevices) |device| {
+    self.physicalDevice = for (physicalDevices) |device| {
         if (try isDeviceSuitable(allocator, device)) {
             break device;
         }
