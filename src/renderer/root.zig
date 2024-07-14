@@ -7,6 +7,7 @@ const HEIGHT = 600;
 
 const enableValidationLayers = std.debug.runtime_safety;
 const validationLayers = [_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
+const deviceExtensions = [_][*:0]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
 instance: c.VkInstance = undefined,
 debugMessenger: c.VkDebugUtilsMessengerEXT = undefined,
@@ -15,6 +16,10 @@ physicalDevice: c.VkPhysicalDevice = undefined,
 device: c.VkDevice = undefined,
 graphicsQueue: c.VkQueue = undefined,
 presentQueue: c.VkQueue = undefined,
+swapChain: c.VkSwapchainKHR = undefined,
+swapChainImages: []c.VkImage = undefined,
+swapChainImageFormat: c.VkFormat = undefined,
+swapChainExtent: c.VkExtent2D = undefined,
 
 const QueueFamilyIndices = struct {
     graphicsFamily: ?u32 = null,
@@ -22,6 +27,24 @@ const QueueFamilyIndices = struct {
 
     fn isComplete(self: QueueFamilyIndices) bool {
         return self.graphicsFamily != null and self.presentFamily != null;
+    }
+};
+
+const SwapChainSupportDetails = struct {
+    capabilities: c.VkSurfaceCapabilitiesKHR = undefined,
+    formats: std.ArrayList(c.VkSurfaceFormatKHR) = undefined,
+    presentModes: std.ArrayList(c.VkPresentModeKHR) = undefined,
+
+    pub fn init(allocator: std.mem.Allocator) SwapChainSupportDetails {
+        return SwapChainSupportDetails{
+            .formats = std.ArrayList(c.VkSurfaceFormatKHR).init(allocator),
+            .presentModes = std.ArrayList(c.VkPresentModeKHR).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *SwapChainSupportDetails) void {
+        self.formats.deinit();
+        self.presentModes.deinit();
     }
 };
 
@@ -46,7 +69,17 @@ pub fn run(allocator: std.mem.Allocator) !void {
     self.cleanup();
 }
 
+fn initVulkan(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindow) !void {
+    try self.createInstance(allocator);
+    try self.setupDebugMessenger();
+    try self.createSurface(window);
+    try self.pickPhysicalDevice(allocator);
+    try self.createLogicalDevice(allocator);
+    try self.createSwapChain(allocator, window);
+}
+
 fn cleanup(self: *@This()) void {
+    c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
     c.vkDestroySurfaceKHR(self.instance, self.surface, null);
     c.vkDestroyDevice(self.device, null);
 
@@ -54,14 +87,6 @@ fn cleanup(self: *@This()) void {
         DestroyDebugUtilsMessengerEXT(self.instance, self.debugMessenger, null);
 
     c.vkDestroyInstance(self.instance, null);
-}
-
-fn initVulkan(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindow) !void {
-    try self.createInstance(allocator);
-    try self.setupDebugMessenger();
-    try self.createSurface(window);
-    try self.pickPhysicalDevice(allocator);
-    try self.createLogicalDevice(allocator);
 }
 
 fn createInstance(self: *@This(), allocator: std.mem.Allocator) !void {
@@ -212,7 +237,78 @@ fn pickPhysicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
 fn isDeviceSuitable(self: @This(), allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !bool {
     const indices = try self.findQueueFamilies(allocator, device);
 
-    return indices.isComplete();
+    const extensionsSupported = try checkDeviceExtensionSupport(allocator, device);
+
+    const swapChainAdequate = if (extensionsSupported) block: {
+        var swapChainSupport = try self.querySwapChainSupport(allocator, device);
+        defer swapChainSupport.deinit();
+        break :block swapChainSupport.formats.items.len != 0 and swapChainSupport.presentModes.items.len != 0;
+    } else false;
+
+    return indices.isComplete() and extensionsSupported and swapChainAdequate;
+}
+
+fn checkDeviceExtensionSupport(allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !bool {
+    var extensionCount: u32 = undefined;
+    if (c.vkEnumerateDeviceExtensionProperties(device, null, &extensionCount, null) != c.VK_SUCCESS) return error.VulkanDeviceExtensionEnumerationFailed;
+
+    const availableExtensions = try allocator.alloc(c.VkExtensionProperties, extensionCount);
+    defer allocator.free(availableExtensions);
+
+    if (c.vkEnumerateDeviceExtensionProperties(device, null, &extensionCount, availableExtensions.ptr) != c.VK_SUCCESS) return error.VulkanDeviceExtensionEnumerationFailed;
+
+    var requiredExtensions = std.HashMap(
+        [*:0]const u8,
+        void,
+        struct {
+            pub fn hash(_: @This(), self: [*:0]const u8) u64 {
+                var h: u32 = 2166136261;
+                var i: usize = 0;
+                while (self[i] != 0) : (i += 1) {
+                    h ^= self[i];
+                    h *%= 16777619;
+                }
+                return h;
+            }
+
+            pub fn eql(_: @This(), self: [*:0]const u8, other: [*:0]const u8) bool {
+                return std.mem.eql(u8, std.mem.span(self), std.mem.span(other));
+            }
+        },
+        std.hash_map.default_max_load_percentage,
+    ).init(allocator);
+    defer requiredExtensions.deinit();
+
+    for (deviceExtensions) |extension|
+        try requiredExtensions.put(extension, {});
+
+    for (availableExtensions) |extension|
+        _ = requiredExtensions.remove(@ptrCast(&extension.extensionName));
+
+    return requiredExtensions.count() == 0;
+}
+
+fn querySwapChainSupport(self: @This(), allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !SwapChainSupportDetails {
+    var details = SwapChainSupportDetails.init(allocator);
+    if (c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, self.surface, &details.capabilities) != c.VK_SUCCESS) return error.VulkanSurfaceCapabilitiesQueryFailed;
+
+    var formatCount: u32 = undefined;
+    if (c.vkGetPhysicalDeviceSurfaceFormatsKHR(device, self.surface, &formatCount, null) != c.VK_SUCCESS) return error.VulkanSurfaceFormatsQueryFailed;
+
+    if (formatCount != 0) {
+        try details.formats.resize(formatCount);
+        if (c.vkGetPhysicalDeviceSurfaceFormatsKHR(device, self.surface, &formatCount, details.formats.items.ptr) != c.VK_SUCCESS) return error.VulkanSurfaceFormatsQueryFailed;
+    }
+
+    var presentModeCount: u32 = undefined;
+    if (c.vkGetPhysicalDeviceSurfacePresentModesKHR(device, self.surface, &presentModeCount, null) != c.VK_SUCCESS) return error.VulkanSurfacePresentModesQueryFailed;
+
+    if (presentModeCount != 0) {
+        try details.presentModes.resize(presentModeCount);
+        if (c.vkGetPhysicalDeviceSurfacePresentModesKHR(device, self.surface, &presentModeCount, details.presentModes.items.ptr) != c.VK_SUCCESS) return error.VulkanSurfacePresentModesQueryFailed;
+    }
+
+    return details;
 }
 
 fn findQueueFamilies(self: @This(), allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !QueueFamilyIndices {
@@ -270,8 +366,8 @@ fn createLogicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
         .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = @intCast(queueCreateInfos.items.len),
         .pQueueCreateInfos = queueCreateInfos.items.ptr,
-        .enabledExtensionCount = 0,
-        .ppEnabledExtensionNames = null,
+        .enabledExtensionCount = @intCast(deviceExtensions.len),
+        .ppEnabledExtensionNames = &deviceExtensions,
         .pEnabledFeatures = &deviceFeatures,
     };
 
@@ -279,4 +375,91 @@ fn createLogicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
 
     c.vkGetDeviceQueue(self.device, indices.graphicsFamily.?, 0, &self.graphicsQueue);
     c.vkGetDeviceQueue(self.device, indices.presentFamily.?, 0, &self.presentQueue);
+}
+
+fn createSwapChain(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindow) !void {
+    var swapChainSupport = try self.querySwapChainSupport(allocator, self.physicalDevice);
+    defer swapChainSupport.deinit();
+
+    const surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats.items);
+    const presentMode = chooseSwapPresentMode(swapChainSupport.presentModes.items);
+    const extent = chooseSwapExtent(window, swapChainSupport.capabilities);
+
+    var imageCount = swapChainSupport.capabilities.minImageCount + 1;
+    if (swapChainSupport.capabilities.maxImageCount > 0 and imageCount > swapChainSupport.capabilities.maxImageCount)
+        imageCount = swapChainSupport.capabilities.maxImageCount;
+
+    const indices = try self.findQueueFamilies(allocator, self.physicalDevice);
+    const queueFamilyIndices = [_]u32{ indices.graphicsFamily.?, indices.presentFamily.? };
+
+    const createInfo = c.VkSwapchainCreateInfoKHR{
+        .sType = c.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .surface = self.surface,
+        .minImageCount = imageCount,
+        .imageFormat = surfaceFormat.format,
+        .imageColorSpace = surfaceFormat.colorSpace,
+        .imageExtent = extent,
+        .imageArrayLayers = 1,
+        .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageSharingMode = if (indices.graphicsFamily != indices.presentFamily) c.VK_SHARING_MODE_CONCURRENT else c.VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = if (indices.graphicsFamily != indices.presentFamily) 2 else 0,
+        .pQueueFamilyIndices = if (indices.graphicsFamily != indices.presentFamily) &queueFamilyIndices else null,
+        .preTransform = swapChainSupport.capabilities.currentTransform,
+        .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = presentMode,
+        .clipped = c.VK_TRUE,
+        .oldSwapchain = null,
+        .pNext = null,
+        .flags = 0,
+    };
+
+    if (c.vkCreateSwapchainKHR(self.device, &createInfo, null, &self.swapChain) != c.VK_SUCCESS) return error.VulkanSwapChainCreationFailed;
+
+    if (c.vkGetSwapchainImagesKHR(self.device, self.swapChain, &imageCount, null) != c.VK_SUCCESS) return error.VulkanSwapChainImageQueryFailed;
+    
+    self.swapChainImages = try allocator.alloc(c.VkImage, imageCount);
+    defer allocator.free(self.swapChainImages);
+
+    if (c.vkGetSwapchainImagesKHR(self.device, self.swapChain, &imageCount, self.swapChainImages.ptr) != c.VK_SUCCESS) return error.VulkanSwapChainImageQueryFailed;
+
+    self.swapChainImageFormat = surfaceFormat.format;
+    self.swapChainExtent = extent;
+}
+
+fn chooseSwapSurfaceFormat(availableFormats: []c.VkSurfaceFormatKHR) c.VkSurfaceFormatKHR {
+    for (availableFormats) |availableFormat| {
+        if (availableFormat.format == c.VK_FORMAT_B8G8R8A8_SRGB and availableFormat.colorSpace == c.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+            return availableFormat;
+    }
+
+    return availableFormats[0];
+}
+
+fn chooseSwapPresentMode(availablePresentModes: []c.VkPresentModeKHR) c.VkPresentModeKHR {
+    for (availablePresentModes) |availablePresentMode| {
+        if (availablePresentMode == c.VK_PRESENT_MODE_MAILBOX_KHR)
+            return availablePresentMode;
+    }
+
+    return c.VK_PRESENT_MODE_FIFO_KHR;
+}
+
+fn chooseSwapExtent(window: *c.GLFWwindow, capabilities: c.VkSurfaceCapabilitiesKHR) c.VkExtent2D {
+    if (capabilities.currentExtent.width != std.math.maxInt(u32))
+        return capabilities.currentExtent;
+
+    var width: i32 = undefined;
+    var height: i32 = undefined;
+
+    c.glfwGetFramebufferSize(window, &width, &height);
+
+    var actualExtent = c.VkExtent2D{
+        .width = @intCast(width),
+        .height = @intCast(height),
+    };
+
+    actualExtent.width = std.math.clamp(actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+    actualExtent.height = std.math.clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+
+    return actualExtent;
 }
