@@ -12,6 +12,7 @@ instance: c.VkInstance = undefined,
 debugMessenger: c.VkDebugUtilsMessengerEXT = undefined,
 physicalDevice: c.VkPhysicalDevice = undefined,
 device: c.VkDevice = undefined,
+graphicsQueue: c.VkQueue = undefined,
 
 const QueueFamilyIndices = struct {
     graphicsFamily: ?u32 = null,
@@ -41,6 +42,8 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 fn cleanup(self: *@This()) void {
+    c.vkDestroyDevice(self.device, null);
+
     if (enableValidationLayers)
         DestroyDebugUtilsMessengerEXT(self.instance, self.debugMessenger, null);
 
@@ -51,6 +54,7 @@ fn initVulkan(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindo
     try self.createInstance(allocator);
     try self.setupDebugMessenger();
     try self.pickPhysicalDevice(allocator);
+    try self.createLogicalDevice(allocator);
     _ = window;
 }
 
@@ -220,4 +224,31 @@ fn findQueueFamilies(allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !
     }
 
     return indices;
+}
+
+fn createLogicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
+    const indices = try findQueueFamilies(allocator, self.physicalDevice);
+
+    var queuePriority: f32 = 1.0;
+    const queueCreateInfo = c.VkDeviceQueueCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        .queueFamilyIndex = indices.graphicsFamily.?,
+        .queueCount = 1,
+        .pQueuePriorities = &queuePriority,
+    };
+
+    const deviceFeatures = c.VkPhysicalDeviceFeatures{};
+
+    const createInfo = c.VkDeviceCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .queueCreateInfoCount = 1,
+        .pQueueCreateInfos = &queueCreateInfo,
+        .enabledExtensionCount = 0,
+        .ppEnabledExtensionNames = null,
+        .pEnabledFeatures = &deviceFeatures,
+    };
+
+    if (c.vkCreateDevice(self.physicalDevice, &createInfo, null, &self.device) != c.VK_SUCCESS) return error.VulkanLogicalDeviceCreationFailed;
+
+    c.vkGetDeviceQueue(self.device, indices.graphicsFamily.?, 0, &self.graphicsQueue);
 }
