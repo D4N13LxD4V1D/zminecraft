@@ -10,21 +10,26 @@ const validationLayers = [_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
 
 instance: c.VkInstance = undefined,
 debugMessenger: c.VkDebugUtilsMessengerEXT = undefined,
+surface: c.VkSurfaceKHR = undefined,
 physicalDevice: c.VkPhysicalDevice = undefined,
 device: c.VkDevice = undefined,
 graphicsQueue: c.VkQueue = undefined,
+presentQueue: c.VkQueue = undefined,
 
 const QueueFamilyIndices = struct {
     graphicsFamily: ?u32 = null,
+    presentFamily: ?u32 = null,
 
     fn isComplete(self: QueueFamilyIndices) bool {
-        return self.graphicsFamily != null;
+        return self.graphicsFamily != null and self.presentFamily != null;
     }
 };
 
 pub fn run(allocator: std.mem.Allocator) !void {
     if (c.glfwInit() != c.GLFW_TRUE) return error.GlfwInitFailed;
     defer c.glfwTerminate();
+
+    c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
 
     const window = c.glfwCreateWindow(WIDTH, HEIGHT, "zminecraft", null, null) orelse return error.GlfwWindowCreationFailed;
     defer c.glfwDestroyWindow(window);
@@ -42,6 +47,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 fn cleanup(self: *@This()) void {
+    c.vkDestroySurfaceKHR(self.instance, self.surface, null);
     c.vkDestroyDevice(self.device, null);
 
     if (enableValidationLayers)
@@ -53,9 +59,9 @@ fn cleanup(self: *@This()) void {
 fn initVulkan(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindow) !void {
     try self.createInstance(allocator);
     try self.setupDebugMessenger();
+    try self.createSurface(window);
     try self.pickPhysicalDevice(allocator);
     try self.createLogicalDevice(allocator);
-    _ = window;
 }
 
 fn createInstance(self: *@This(), allocator: std.mem.Allocator) !void {
@@ -183,6 +189,10 @@ fn DestroyDebugUtilsMessengerEXT(instance: c.VkInstance, debugMessenger: c.VkDeb
     return func.?(instance, debugMessenger, pAllocator);
 }
 
+fn createSurface(self: *@This(), window: *c.GLFWwindow) !void {
+    if (c.glfwCreateWindowSurface(self.instance, window, null, &self.surface) != c.VK_SUCCESS) return error.FailedToCreateWindowSurface;
+}
+
 fn pickPhysicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
     var physicalDeviceCount: u32 = undefined;
     if (c.vkEnumeratePhysicalDevices(self.instance, &physicalDeviceCount, null) != c.VK_SUCCESS) return error.VulkanPhysicalDeviceEnumerationFailed;
@@ -193,19 +203,19 @@ fn pickPhysicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
     if (c.vkEnumeratePhysicalDevices(self.instance, &physicalDeviceCount, physicalDevices.ptr) != c.VK_SUCCESS) return error.VulkanPhysicalDeviceEnumerationFailed;
 
     self.physicalDevice = for (physicalDevices) |device| {
-        if (try isDeviceSuitable(allocator, device)) {
+        if (try self.isDeviceSuitable(allocator, device)) {
             break device;
         }
     } else return error.VulkanNoSuitablePhysicalDeviceFound;
 }
 
-fn isDeviceSuitable(allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !bool {
-    const indices = try findQueueFamilies(allocator, device);
+fn isDeviceSuitable(self: @This(), allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !bool {
+    const indices = try self.findQueueFamilies(allocator, device);
 
     return indices.isComplete();
 }
 
-fn findQueueFamilies(allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !QueueFamilyIndices {
+fn findQueueFamilies(self: @This(), allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !QueueFamilyIndices {
     var queueFamilyCount: u32 = 0;
     c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, null);
 
@@ -216,9 +226,14 @@ fn findQueueFamilies(allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !
     var indices = QueueFamilyIndices{};
 
     for (queueFamilies, 0..) |queueFamily, i| {
-        if ((queueFamily.queueFlags & c.VK_QUEUE_GRAPHICS_BIT) != 0) {
+        if (queueFamily.queueCount > 0 and (queueFamily.queueFlags & c.VK_QUEUE_GRAPHICS_BIT) != 0)
             indices.graphicsFamily = @intCast(i);
-        }
+
+        var presentSupport: c.VkBool32 = undefined;
+        if (c.vkGetPhysicalDeviceSurfaceSupportKHR(device, @intCast(i), self.surface, &presentSupport) != c.VK_SUCCESS) return error.VulkanSurfaceSupportCheckFailed;
+
+        if (queueFamily.queueCount > 0 and presentSupport != 0)
+            indices.presentFamily = @intCast(i);
 
         if (indices.isComplete()) break;
     }
@@ -227,22 +242,34 @@ fn findQueueFamilies(allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !
 }
 
 fn createLogicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
-    const indices = try findQueueFamilies(allocator, self.physicalDevice);
+    const indices = try self.findQueueFamilies(allocator, self.physicalDevice);
+
+    var queueCreateInfos = std.ArrayList(c.VkDeviceQueueCreateInfo).init(allocator);
+    defer queueCreateInfos.deinit();
+
+    const allQueueFamilies = [_]u32{ indices.graphicsFamily.?, indices.presentFamily.? };
+    const uniqueQueueFamilies = if (indices.graphicsFamily.? == indices.presentFamily.?) allQueueFamilies[0..1] else allQueueFamilies[0..2];
 
     var queuePriority: f32 = 1.0;
-    const queueCreateInfo = c.VkDeviceQueueCreateInfo{
-        .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = indices.graphicsFamily.?,
-        .queueCount = 1,
-        .pQueuePriorities = &queuePriority,
-    };
+    for (uniqueQueueFamilies) |queueFamily| {
+        const queueCreateInfo = c.VkDeviceQueueCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .queueFamilyIndex = queueFamily,
+            .queueCount = 1,
+            .pQueuePriorities = &queuePriority,
+            .pNext = null,
+            .flags = 0,
+        };
+
+        try queueCreateInfos.append(queueCreateInfo);
+    }
 
     const deviceFeatures = c.VkPhysicalDeviceFeatures{};
 
     const createInfo = c.VkDeviceCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .queueCreateInfoCount = 1,
-        .pQueueCreateInfos = &queueCreateInfo,
+        .queueCreateInfoCount = @intCast(queueCreateInfos.items.len),
+        .pQueueCreateInfos = queueCreateInfos.items.ptr,
         .enabledExtensionCount = 0,
         .ppEnabledExtensionNames = null,
         .pEnabledFeatures = &deviceFeatures,
@@ -251,4 +278,5 @@ fn createLogicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
     if (c.vkCreateDevice(self.physicalDevice, &createInfo, null, &self.device) != c.VK_SUCCESS) return error.VulkanLogicalDeviceCreationFailed;
 
     c.vkGetDeviceQueue(self.device, indices.graphicsFamily.?, 0, &self.graphicsQueue);
+    c.vkGetDeviceQueue(self.device, indices.presentFamily.?, 0, &self.presentQueue);
 }
