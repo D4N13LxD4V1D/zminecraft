@@ -67,7 +67,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         c.glfwPollEvents();
     }
 
-    self.cleanup();
+    try self.cleanup(allocator);
 }
 
 fn initVulkan(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindow) !void {
@@ -78,13 +78,17 @@ fn initVulkan(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindo
     try self.createLogicalDevice(allocator);
     try self.createSwapChain(allocator, window);
     try self.createImageViews(allocator);
+    try self.createGraphicsPipeline(allocator);
 }
 
-fn cleanup(self: *@This()) void {
+fn cleanup(self: *@This(), allocator: std.mem.Allocator) !void {
     for (self.swapChainImageViews) |imageView|
         c.vkDestroyImageView(self.device, imageView, null);
+    allocator.free(self.swapChainImageViews);
 
     c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
+    allocator.free(self.swapChainImages);
+
     c.vkDestroySurfaceKHR(self.instance, self.surface, null);
     c.vkDestroyDevice(self.device, null);
 
@@ -497,4 +501,9 @@ fn createImageViews(self: *@This(), allocator: std.mem.Allocator) !void {
 
         if (c.vkCreateImageView(self.device, &createInfo, null, &self.swapChainImageViews[i]) != c.VK_SUCCESS) return error.VulkanImageViewCreationFailed;
     }
+}
+
+fn createGraphicsPipeline(self: *@This(), allocator: std.mem.Allocator) !void {
+    _ = allocator;
+    _ = self;
 }
