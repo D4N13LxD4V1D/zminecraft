@@ -20,6 +20,7 @@ swapChain: c.VkSwapchainKHR = undefined,
 swapChainImages: []c.VkImage = undefined,
 swapChainImageFormat: c.VkFormat = undefined,
 swapChainExtent: c.VkExtent2D = undefined,
+swapChainImageViews: []c.VkImageView = undefined,
 
 const QueueFamilyIndices = struct {
     graphicsFamily: ?u32 = null,
@@ -76,9 +77,13 @@ fn initVulkan(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindo
     try self.pickPhysicalDevice(allocator);
     try self.createLogicalDevice(allocator);
     try self.createSwapChain(allocator, window);
+    try self.createImageViews(allocator);
 }
 
 fn cleanup(self: *@This()) void {
+    for (self.swapChainImageViews) |imageView|
+        c.vkDestroyImageView(self.device, imageView, null);
+
     c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
     c.vkDestroySurfaceKHR(self.instance, self.surface, null);
     c.vkDestroyDevice(self.device, null);
@@ -152,7 +157,7 @@ fn getRequiredExtensions(allocator: std.mem.Allocator) ![][*]const u8 {
     const glfwExtensions: [*]const [*]const u8 = @ptrCast(c.glfwGetRequiredInstanceExtensions(&glfwExtensionCount));
 
     var extensions = std.ArrayList([*]const u8).init(allocator);
-    defer extensions.deinit();
+    errdefer extensions.deinit();
 
     try extensions.appendSlice(glfwExtensions[0..glfwExtensionCount]);
 
@@ -248,6 +253,32 @@ fn isDeviceSuitable(self: @This(), allocator: std.mem.Allocator, device: c.VkPhy
     return indices.isComplete() and extensionsSupported and swapChainAdequate;
 }
 
+fn findQueueFamilies(self: @This(), allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !QueueFamilyIndices {
+    var queueFamilyCount: u32 = 0;
+    c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, null);
+
+    const queueFamilies = try allocator.alloc(c.VkQueueFamilyProperties, queueFamilyCount);
+    defer allocator.free(queueFamilies);
+    c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.ptr);
+
+    var indices = QueueFamilyIndices{};
+
+    for (queueFamilies, 0..) |queueFamily, i| {
+        if (queueFamily.queueCount > 0 and (queueFamily.queueFlags & c.VK_QUEUE_GRAPHICS_BIT) != 0)
+            indices.graphicsFamily = @intCast(i);
+
+        var presentSupport: c.VkBool32 = undefined;
+        if (c.vkGetPhysicalDeviceSurfaceSupportKHR(device, @intCast(i), self.surface, &presentSupport) != c.VK_SUCCESS) return error.VulkanSurfaceSupportCheckFailed;
+
+        if (queueFamily.queueCount > 0 and presentSupport != 0)
+            indices.presentFamily = @intCast(i);
+
+        if (indices.isComplete()) break;
+    }
+
+    return indices;
+}
+
 fn checkDeviceExtensionSupport(allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !bool {
     var extensionCount: u32 = undefined;
     if (c.vkEnumerateDeviceExtensionProperties(device, null, &extensionCount, null) != c.VK_SUCCESS) return error.VulkanDeviceExtensionEnumerationFailed;
@@ -309,32 +340,6 @@ fn querySwapChainSupport(self: @This(), allocator: std.mem.Allocator, device: c.
     }
 
     return details;
-}
-
-fn findQueueFamilies(self: @This(), allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !QueueFamilyIndices {
-    var queueFamilyCount: u32 = 0;
-    c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, null);
-
-    const queueFamilies = try allocator.alloc(c.VkQueueFamilyProperties, queueFamilyCount);
-    defer allocator.free(queueFamilies);
-    c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.ptr);
-
-    var indices = QueueFamilyIndices{};
-
-    for (queueFamilies, 0..) |queueFamily, i| {
-        if (queueFamily.queueCount > 0 and (queueFamily.queueFlags & c.VK_QUEUE_GRAPHICS_BIT) != 0)
-            indices.graphicsFamily = @intCast(i);
-
-        var presentSupport: c.VkBool32 = undefined;
-        if (c.vkGetPhysicalDeviceSurfaceSupportKHR(device, @intCast(i), self.surface, &presentSupport) != c.VK_SUCCESS) return error.VulkanSurfaceSupportCheckFailed;
-
-        if (queueFamily.queueCount > 0 and presentSupport != 0)
-            indices.presentFamily = @intCast(i);
-
-        if (indices.isComplete()) break;
-    }
-
-    return indices;
 }
 
 fn createLogicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
@@ -416,9 +421,8 @@ fn createSwapChain(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFW
     if (c.vkCreateSwapchainKHR(self.device, &createInfo, null, &self.swapChain) != c.VK_SUCCESS) return error.VulkanSwapChainCreationFailed;
 
     if (c.vkGetSwapchainImagesKHR(self.device, self.swapChain, &imageCount, null) != c.VK_SUCCESS) return error.VulkanSwapChainImageQueryFailed;
-    
+
     self.swapChainImages = try allocator.alloc(c.VkImage, imageCount);
-    defer allocator.free(self.swapChainImages);
 
     if (c.vkGetSwapchainImagesKHR(self.device, self.swapChain, &imageCount, self.swapChainImages.ptr) != c.VK_SUCCESS) return error.VulkanSwapChainImageQueryFailed;
 
@@ -462,4 +466,35 @@ fn chooseSwapExtent(window: *c.GLFWwindow, capabilities: c.VkSurfaceCapabilities
     actualExtent.height = std.math.clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
 
     return actualExtent;
+}
+
+fn createImageViews(self: *@This(), allocator: std.mem.Allocator) !void {
+    self.swapChainImageViews = try allocator.alloc(c.VkImageView, self.swapChainImages.len);
+    errdefer allocator.free(self.swapChainImageViews);
+
+    for (self.swapChainImages, 0..) |swapChainImage, i| {
+        const createInfo = c.VkImageViewCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = swapChainImage,
+            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+            .format = self.swapChainImageFormat,
+            .components = c.VkComponentMapping{
+                .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = c.VkImageSubresourceRange{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .pNext = null,
+            .flags = 0,
+        };
+
+        if (c.vkCreateImageView(self.device, &createInfo, null, &self.swapChainImageViews[i]) != c.VK_SUCCESS) return error.VulkanImageViewCreationFailed;
+    }
 }
