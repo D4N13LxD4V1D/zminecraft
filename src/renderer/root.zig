@@ -5,26 +5,21 @@ const c = @import("c.zig").c;
 const WIDTH = 800;
 const HEIGHT = 600;
 
+const MAX_FRAMES_IN_FLIGHT = 2;
+
 const enableValidationLayers = std.debug.runtime_safety;
 const validationLayers = [_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
-const deviceExtensions = if (builtin.os.tag == .macos) [_][*:0]const u8{  "VK_KHR_portability_subset", c.VK_KHR_SWAPCHAIN_EXTENSION_NAME } else [_][*:0]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+const deviceExtensions = if (builtin.os.tag == .macos) [_][*:0]const u8{ "VK_KHR_portability_subset", c.VK_KHR_SWAPCHAIN_EXTENSION_NAME } else [_][*:0]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
-instance: c.VkInstance = undefined,
-debugMessenger: c.VkDebugUtilsMessengerEXT = undefined,
-surface: c.VkSurfaceKHR = undefined,
-physicalDevice: c.VkPhysicalDevice = undefined,
-device: c.VkDevice = undefined,
-graphicsQueue: c.VkQueue = undefined,
-presentQueue: c.VkQueue = undefined,
-swapChain: c.VkSwapchainKHR = undefined,
-swapChainImages: []c.VkImage = undefined,
-swapChainImageFormat: c.VkFormat = undefined,
-swapChainExtent: c.VkExtent2D = undefined,
-swapChainImageViews: []c.VkImageView = undefined,
-renderPass: c.VkRenderPass = undefined,
-pipelineLayout: c.VkPipelineLayout = undefined,
-graphicsPipeline: c.VkPipeline = undefined,
-swapChainFramebuffers: []c.VkFramebuffer = undefined,
+fn CreateDebugUtilsMessengerEXT(instance: c.VkInstance, pCreateInfo: *const c.VkDebugUtilsMessengerCreateInfoEXT, pAllocator: ?*const c.VkAllocationCallbacks, pDebugMessenger: *c.VkDebugUtilsMessengerEXT) c.VkResult {
+    const func: c.PFN_vkCreateDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT") orelse return c.VK_ERROR_EXTENSION_NOT_PRESENT);
+    return func.?(instance, pCreateInfo, pAllocator, pDebugMessenger);
+}
+
+fn DestroyDebugUtilsMessengerEXT(instance: c.VkInstance, debugMessenger: c.VkDebugUtilsMessengerEXT, pAllocator: ?*const c.VkAllocationCallbacks) void {
+    const func: c.PFN_vkDestroyDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT") orelse unreachable);
+    return func.?(instance, debugMessenger, pAllocator);
+}
 
 const QueueFamilyIndices = struct {
     graphicsFamily: ?u32 = null,
@@ -53,48 +48,91 @@ const SwapChainSupportDetails = struct {
     }
 };
 
+window: *c.GLFWwindow = undefined,
+
+instance: c.VkInstance = undefined,
+debugMessenger: c.VkDebugUtilsMessengerEXT = undefined,
+surface: c.VkSurfaceKHR = undefined,
+
+physicalDevice: c.VkPhysicalDevice = undefined,
+device: c.VkDevice = undefined,
+
+graphicsQueue: c.VkQueue = undefined,
+presentQueue: c.VkQueue = undefined,
+
+swapChain: c.VkSwapchainKHR = undefined,
+swapChainImages: []c.VkImage = undefined,
+swapChainImageFormat: c.VkFormat = undefined,
+swapChainExtent: c.VkExtent2D = undefined,
+swapChainImageViews: []c.VkImageView = undefined,
+swapChainFramebuffers: []c.VkFramebuffer = undefined,
+
+renderPass: c.VkRenderPass = undefined,
+pipelineLayout: c.VkPipelineLayout = undefined,
+graphicsPipeline: c.VkPipeline = undefined,
+
+commandPool: c.VkCommandPool = undefined,
+commandBuffers: [MAX_FRAMES_IN_FLIGHT]c.VkCommandBuffer = undefined,
+
+imageAvailableSemaphores: [MAX_FRAMES_IN_FLIGHT]c.VkSemaphore = undefined,
+renderFinishedSemaphores: [MAX_FRAMES_IN_FLIGHT]c.VkSemaphore = undefined,
+inFlightFences: [MAX_FRAMES_IN_FLIGHT]c.VkFence = undefined,
+currentFrame: u32 = 0,
+
+framebufferResized: bool = false,
+
 pub fn run(allocator: std.mem.Allocator) !void {
-    if (c.glfwInit() != c.GLFW_TRUE) return error.GlfwInitFailed;
-    defer c.glfwTerminate();
-
-    c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-
-    const window = c.glfwCreateWindow(WIDTH, HEIGHT, "zminecraft", null, null) orelse return error.GlfwWindowCreationFailed;
-    defer c.glfwDestroyWindow(window);
-
     var self: @This() = .{};
-    try self.initVulkan(allocator, window);
-
-    c.glfwMakeContextCurrent(window);
-    while (c.glfwWindowShouldClose(window) == c.GLFW_FALSE) {
-        c.glfwSwapBuffers(window);
-        c.glfwPollEvents();
-    }
-
+    try self.initWindow();
+    try self.initVulkan(allocator);
+    try self.mainLoop(allocator);
     try self.cleanup(allocator);
 }
 
-fn initVulkan(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindow) !void {
+fn initWindow(self: *@This()) !void {
+    if (c.glfwInit() != c.GLFW_TRUE) return error.GlfwInitFailed;
+
+    c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
+
+    self.window = c.glfwCreateWindow(WIDTH, HEIGHT, "zminecraft", null, null) orelse return error.GlfwWindowCreationFailed;
+    // c.glfwSetWindowUserPointer(self.window, self);
+    // if (c.glfwSetFramebufferSizeCallback(self.window, framebufferResizeCallback) == null) return error.GlfwSetFramebufferSizeCallbackFailed;
+}
+
+fn framebufferResizeCallback(window: ?*c.GLFWwindow, _: c_int, _: c_int) callconv(.C) void {
+    var self: *@This() = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(window)));
+    self.framebufferResized = true;
+}
+
+fn initVulkan(self: *@This(), allocator: std.mem.Allocator) !void {
     try self.createInstance(allocator);
     try self.setupDebugMessenger();
-    try self.createSurface(window);
+    try self.createSurface();
     try self.pickPhysicalDevice(allocator);
     try self.createLogicalDevice(allocator);
-    try self.createSwapChain(allocator, window);
+    try self.createSwapChain(allocator);
     try self.createImageViews(allocator);
     try self.createRenderPass();
     try self.createGraphicsPipeline();
     try self.createFramebuffers(allocator);
+    try self.createCommandPool(allocator);
+    try self.createCommandBuffers();
+    try self.createSyncObjects();
 }
 
-fn cleanup(self: *@This(), allocator: std.mem.Allocator) !void {
+fn mainLoop(self: *@This(), allocator: std.mem.Allocator) !void {
+    while (c.glfwWindowShouldClose(self.window) == c.GLFW_FALSE) {
+        c.glfwPollEvents();
+        try self.drawFrame(allocator);
+    }
+
+    if (c.vkDeviceWaitIdle(self.device) != c.VK_SUCCESS) return error.VulkanDeviceWaitIdleFailed;
+}
+
+fn cleanupSwapChain(self: *@This(), allocator: std.mem.Allocator) void {
     for (self.swapChainFramebuffers) |framebuffer|
         c.vkDestroyFramebuffer(self.device, framebuffer, null);
     allocator.free(self.swapChainFramebuffers);
-
-    c.vkDestroyPipeline(self.device, self.graphicsPipeline, null);
-    c.vkDestroyPipelineLayout(self.device, self.pipelineLayout, null);
-    c.vkDestroyRenderPass(self.device, self.renderPass, null);
 
     for (self.swapChainImageViews) |imageView|
         c.vkDestroyImageView(self.device, imageView, null);
@@ -102,14 +140,53 @@ fn cleanup(self: *@This(), allocator: std.mem.Allocator) !void {
 
     c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
     allocator.free(self.swapChainImages);
+}
 
-    c.vkDestroySurfaceKHR(self.instance, self.surface, null);
+fn cleanup(self: *@This(), allocator: std.mem.Allocator) !void {
+    self.cleanupSwapChain(allocator);
+
+    c.vkDestroyPipeline(self.device, self.graphicsPipeline, null);
+    c.vkDestroyPipelineLayout(self.device, self.pipelineLayout, null);
+
+    c.vkDestroyRenderPass(self.device, self.renderPass, null);
+
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        c.vkDestroySemaphore(self.device, self.renderFinishedSemaphores[i], null);
+        c.vkDestroySemaphore(self.device, self.imageAvailableSemaphores[i], null);
+        c.vkDestroyFence(self.device, self.inFlightFences[i], null);
+    }
+
+    c.vkDestroyCommandPool(self.device, self.commandPool, null);
+
     c.vkDestroyDevice(self.device, null);
 
     if (enableValidationLayers)
         DestroyDebugUtilsMessengerEXT(self.instance, self.debugMessenger, null);
 
+    c.vkDestroySurfaceKHR(self.instance, self.surface, null);
     c.vkDestroyInstance(self.instance, null);
+
+    c.glfwDestroyWindow(self.window);
+    c.glfwTerminate();
+}
+
+fn recreateSwapChain(self: *@This(), allocator: std.mem.Allocator) !void {
+    var width: i32 = undefined;
+    var height: i32 = undefined;
+    c.glfwGetFramebufferSize(self.window, &width, &height);
+
+    while (self.swapChainExtent.width == 0 or self.swapChainExtent.height == 0) {
+        c.glfwGetFramebufferSize(self.window, &width, &height);
+        c.glfwWaitEvents();
+    }
+
+    if (c.vkDeviceWaitIdle(self.device) != c.VK_SUCCESS) return error.VulkanDeviceWaitFailed;
+
+    self.cleanupSwapChain(allocator);
+
+    try self.createSwapChain(allocator);
+    try self.createImageViews(allocator);
+    try self.createFramebuffers(allocator);
 }
 
 fn createInstance(self: *@This(), allocator: std.mem.Allocator) !void {
@@ -227,18 +304,8 @@ fn debugCallback(
     return c.VK_FALSE;
 }
 
-fn CreateDebugUtilsMessengerEXT(instance: c.VkInstance, pCreateInfo: *const c.VkDebugUtilsMessengerCreateInfoEXT, pAllocator: ?*const c.VkAllocationCallbacks, pDebugMessenger: *c.VkDebugUtilsMessengerEXT) c.VkResult {
-    const func: c.PFN_vkCreateDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT") orelse return c.VK_ERROR_EXTENSION_NOT_PRESENT);
-    return func.?(instance, pCreateInfo, pAllocator, pDebugMessenger);
-}
-
-fn DestroyDebugUtilsMessengerEXT(instance: c.VkInstance, debugMessenger: c.VkDebugUtilsMessengerEXT, pAllocator: ?*const c.VkAllocationCallbacks) void {
-    const func: c.PFN_vkDestroyDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT") orelse unreachable);
-    return func.?(instance, debugMessenger, pAllocator);
-}
-
-fn createSurface(self: *@This(), window: *c.GLFWwindow) !void {
-    if (c.glfwCreateWindowSurface(self.instance, window, null, &self.surface) != c.VK_SUCCESS) return error.FailedToCreateWindowSurface;
+fn createSurface(self: *@This()) !void {
+    if (c.glfwCreateWindowSurface(self.instance, self.window, null, &self.surface) != c.VK_SUCCESS) return error.FailedToCreateWindowSurface;
 }
 
 fn pickPhysicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
@@ -392,6 +459,10 @@ fn createLogicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
         .enabledExtensionCount = @intCast(deviceExtensions.len),
         .ppEnabledExtensionNames = &deviceExtensions,
         .pEnabledFeatures = &deviceFeatures,
+        .enabledLayerCount = if (enableValidationLayers) @intCast(validationLayers.len) else 0,
+        .ppEnabledLayerNames = if (enableValidationLayers) &validationLayers else null,
+        .pNext = null,
+        .flags = 0,
     };
 
     if (c.vkCreateDevice(self.physicalDevice, &createInfo, null, &self.device) != c.VK_SUCCESS) return error.VulkanLogicalDeviceCreationFailed;
@@ -400,13 +471,13 @@ fn createLogicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
     c.vkGetDeviceQueue(self.device, indices.presentFamily.?, 0, &self.presentQueue);
 }
 
-fn createSwapChain(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindow) !void {
+fn createSwapChain(self: *@This(), allocator: std.mem.Allocator) !void {
     var swapChainSupport = try self.querySwapChainSupport(allocator, self.physicalDevice);
     defer swapChainSupport.deinit();
 
     const surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats.items);
     const presentMode = chooseSwapPresentMode(swapChainSupport.presentModes.items);
-    const extent = chooseSwapExtent(window, swapChainSupport.capabilities);
+    const extent = chooseSwapExtent(self.window, swapChainSupport.capabilities);
 
     var imageCount = swapChainSupport.capabilities.minImageCount + 1;
     if (swapChainSupport.capabilities.maxImageCount > 0 and imageCount > swapChainSupport.capabilities.maxImageCount)
@@ -441,6 +512,7 @@ fn createSwapChain(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFW
     if (c.vkGetSwapchainImagesKHR(self.device, self.swapChain, &imageCount, null) != c.VK_SUCCESS) return error.VulkanSwapChainImageQueryFailed;
 
     self.swapChainImages = try allocator.alloc(c.VkImage, imageCount);
+    errdefer allocator.free(self.swapChainImages);
 
     if (c.vkGetSwapchainImagesKHR(self.device, self.swapChain, &imageCount, self.swapChainImages.ptr) != c.VK_SUCCESS) return error.VulkanSwapChainImageQueryFailed;
 
@@ -548,14 +620,24 @@ fn createRenderPass(self: *@This()) !void {
         .flags = 0,
     };
 
+    const dependency = c.VkSubpassDependency{
+        .srcSubpass = c.VK_SUBPASS_EXTERNAL,
+        .dstSubpass = 0,
+        .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = 0,
+        .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .dependencyFlags = 0,
+    };
+
     const renderPassInfo = c.VkRenderPassCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         .attachmentCount = 1,
         .pAttachments = &colorAttachment,
         .subpassCount = 1,
         .pSubpasses = &subpass,
-        .dependencyCount = 0,
-        .pDependencies = null,
+        .dependencyCount = 1,
+        .pDependencies = &dependency,
         .pNext = null,
         .flags = 0,
     };
@@ -633,26 +715,12 @@ fn createGraphicsPipeline(self: *@This()) !void {
         .flags = 0,
     };
 
-    const viewport = c.VkViewport{
-        .x = 0.0,
-        .y = 0.0,
-        .width = @floatFromInt(self.swapChainExtent.width),
-        .height = @floatFromInt(self.swapChainExtent.height),
-        .minDepth = 0.0,
-        .maxDepth = 1.0,
-    };
-
-    const scissor = c.VkRect2D{
-        .offset = c.VkOffset2D{ .x = 0, .y = 0 },
-        .extent = self.swapChainExtent,
-    };
-
     const viewportState = c.VkPipelineViewportStateCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .viewportCount = 1,
-        .pViewports = &viewport,
+        .pViewports = null,
         .scissorCount = 1,
-        .pScissors = &scissor,
+        .pScissors = null,
         .pNext = null,
         .flags = 0,
     };
@@ -778,4 +846,163 @@ fn createFramebuffers(self: *@This(), allocator: std.mem.Allocator) !void {
 
         if (c.vkCreateFramebuffer(self.device, &framebufferInfo, null, &self.swapChainFramebuffers[i]) != c.VK_SUCCESS) return error.VulkanFramebufferCreationFailed;
     }
+}
+
+fn createCommandPool(self: *@This(), allocator: std.mem.Allocator) !void {
+    const queueFamilyIndices = try self.findQueueFamilies(allocator, self.physicalDevice);
+
+    const poolInfo = c.VkCommandPoolCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .queueFamilyIndex = queueFamilyIndices.graphicsFamily.?,
+        .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .pNext = null,
+    };
+
+    if (c.vkCreateCommandPool(self.device, &poolInfo, null, &self.commandPool) != c.VK_SUCCESS) return error.VulkanCommandPoolCreationFailed;
+}
+
+fn createCommandBuffers(self: *@This()) !void {
+    const allocInfo = c.VkCommandBufferAllocateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = self.commandPool,
+        .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = @intCast(self.commandBuffers.len),
+        .pNext = null,
+    };
+
+    if (c.vkAllocateCommandBuffers(self.device, &allocInfo, &self.commandBuffers) != c.VK_SUCCESS) return error.VulkanCommandBufferAllocationFailed;
+}
+
+fn createSyncObjects(self: *@This()) !void {
+    const semaphoreInfo = c.VkSemaphoreCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+    };
+
+    const fenceInfo = c.VkFenceCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
+        .pNext = null,
+    };
+
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        if (c.vkCreateSemaphore(self.device, &semaphoreInfo, null, &self.imageAvailableSemaphores[i]) != c.VK_SUCCESS) return error.VulkanSemaphoreCreationFailed;
+        if (c.vkCreateSemaphore(self.device, &semaphoreInfo, null, &self.renderFinishedSemaphores[i]) != c.VK_SUCCESS) return error.VulkanSemaphoreCreationFailed;
+        if (c.vkCreateFence(self.device, &fenceInfo, null, &self.inFlightFences[i]) != c.VK_SUCCESS) return error.VulkanFenceCreationFailed;
+    }
+}
+
+fn drawFrame(self: *@This(), allocator: std.mem.Allocator) !void {
+    if (c.vkWaitForFences(self.device, 1, &self.inFlightFences[self.currentFrame], c.VK_TRUE, std.math.maxInt(u64)) != c.VK_SUCCESS) return error.VulkanFenceWaitFailed;
+
+    var imageIndex: u32 = undefined;
+    var result = c.vkAcquireNextImageKHR(self.device, self.swapChain, std.math.maxInt(u64), self.imageAvailableSemaphores[self.currentFrame], null, &imageIndex);
+
+    if (result == c.VK_ERROR_OUT_OF_DATE_KHR) {
+        try self.recreateSwapChain(allocator);
+        return;
+    } else if (result != c.VK_SUCCESS and result != c.VK_SUBOPTIMAL_KHR) return error.VulkanImageAcquisitionFailed;
+
+    if (c.vkResetFences(self.device, 1, &self.inFlightFences[self.currentFrame]) != c.VK_SUCCESS) return error.VulkanFenceResetFailed;
+    if (c.vkResetCommandBuffer(self.commandBuffers[self.currentFrame], 0) != c.VK_SUCCESS) return error.VulkanCommandBufferResetFailed;
+    try self.recordCommandBuffer(self.commandBuffers[self.currentFrame], imageIndex);
+
+    const waitSemaphores = [_]c.VkSemaphore{self.imageAvailableSemaphores[self.currentFrame]};
+    const waitStages = [_]c.VkPipelineStageFlags{c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+
+    const signalSemaphores = [_]c.VkSemaphore{self.renderFinishedSemaphores[self.currentFrame]};
+
+    var submitInfo = c.VkSubmitInfo{
+        .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &waitSemaphores,
+        .pWaitDstStageMask = &waitStages,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &self.commandBuffers[self.currentFrame],
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &signalSemaphores,
+        .pNext = null,
+    };
+
+    if (c.vkQueueSubmit(self.graphicsQueue, 1, &submitInfo, self.inFlightFences[self.currentFrame]) != c.VK_SUCCESS) return error.VulkanQueueSubmissionFailed;
+
+    const swapChains = [_]c.VkSwapchainKHR{self.swapChain};
+    const presentInfo = c.VkPresentInfoKHR{
+        .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &signalSemaphores,
+        .swapchainCount = 1,
+        .pSwapchains = &swapChains,
+        .pImageIndices = &imageIndex,
+        .pResults = null,
+        .pNext = null,
+    };
+
+    result = c.vkQueuePresentKHR(self.presentQueue, &presentInfo);
+
+    if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR or self.framebufferResized) {
+        self.framebufferResized = false;
+        try self.recreateSwapChain(allocator);
+    } else if (result != c.VK_SUCCESS) return error.VulkanQueuePresentationFailed;
+
+    self.currentFrame = (self.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+}
+
+fn recordCommandBuffer(self: *@This(), commandBuffer: c.VkCommandBuffer, imageIndex: u32) !void {
+    const beginInfo = c.VkCommandBufferBeginInfo{
+        .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = c.VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT,
+        .pInheritanceInfo = null,
+        .pNext = null,
+    };
+
+    if (c.vkBeginCommandBuffer(commandBuffer, &beginInfo) != c.VK_SUCCESS) return error.VulkanCommandBufferBeginFailed;
+
+    const clearColor = [1]c.VkClearValue{
+        c.VkClearValue{
+            .color = c.VkClearColorValue{
+                .float32 = [_]f32{ 0.0, 0.0, 0.0, 1.0 },
+            },
+        },
+    };
+
+    const renderPassInfo = c.VkRenderPassBeginInfo{
+        .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .renderPass = self.renderPass,
+        .framebuffer = self.swapChainFramebuffers[imageIndex],
+        .renderArea = .{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = self.swapChainExtent,
+        },
+        .clearValueCount = 1,
+        .pClearValues = @as(*const [1]c.VkClearValue, &clearColor),
+        .pNext = null,
+    };
+
+    c.vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, c.VK_SUBPASS_CONTENTS_INLINE);
+
+    c.vkCmdBindPipeline(commandBuffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.graphicsPipeline);
+
+    const viewport = c.VkViewport{
+        .x = 0.0,
+        .y = 0.0,
+        .width = @floatFromInt(self.swapChainExtent.width),
+        .height = @floatFromInt(self.swapChainExtent.height),
+        .minDepth = 0.0,
+        .maxDepth = 1.0,
+    };
+    c.vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+    const scissor = c.VkRect2D{
+        .offset = .{ .x = 0, .y = 0 },
+        .extent = self.swapChainExtent,
+    };
+    c.vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+    c.vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+    c.vkCmdEndRenderPass(commandBuffer);
+
+    if (c.vkEndCommandBuffer(commandBuffer) != c.VK_SUCCESS) return error.VulkanCommandBufferEndFailed;
 }
