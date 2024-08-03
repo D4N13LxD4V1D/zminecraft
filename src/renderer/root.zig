@@ -79,10 +79,13 @@ const Vertex = struct {
 };
 
 const vertices = [_]Vertex{
-    Vertex{ .pos = @Vector(2, f32){ 0.0, -0.5 }, .color = @Vector(3, f32){ 1.0, 1.0, 1.0 } },
-    Vertex{ .pos = @Vector(2, f32){ 0.5, 0.5 }, .color = @Vector(3, f32){ 0.0, 1.0, 0.0 } },
-    Vertex{ .pos = @Vector(2, f32){ -0.5, 0.5 }, .color = @Vector(3, f32){ 0.0, 0.0, 1.0 } },
+    Vertex{ .pos = @Vector(2, f32){ -0.5, -0.5 }, .color = @Vector(3, f32){ 1.0, 0.0, 0.0 } },
+    Vertex{ .pos = @Vector(2, f32){ 0.5, -0.5 }, .color = @Vector(3, f32){ 0.0, 1.0, 0.0 } },
+    Vertex{ .pos = @Vector(2, f32){ 0.5, 0.5 }, .color = @Vector(3, f32){ 0.0, 0.0, 1.0 } },
+    Vertex{ .pos = @Vector(2, f32){ -0.5, 0.5 }, .color = @Vector(3, f32){ 1.0, 1.0, 1.0 } },
 };
+
+const _indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
 
 window: *c.GLFWwindow = undefined,
 
@@ -109,6 +112,9 @@ graphicsPipeline: c.VkPipeline = undefined,
 
 vertexBuffer: c.VkBuffer = undefined,
 vertexBufferMemory: c.VkDeviceMemory = undefined,
+
+indexBuffer: c.VkBuffer = undefined,
+indexBufferMemory: c.VkDeviceMemory = undefined,
 
 commandPool: c.VkCommandPool = undefined,
 commandBuffers: [MAX_FRAMES_IN_FLIGHT]c.VkCommandBuffer = undefined,
@@ -156,6 +162,7 @@ fn initVulkan(self: *@This(), allocator: std.mem.Allocator) !void {
     try self.createFramebuffers(allocator);
     try self.createCommandPool(allocator);
     try self.createVertexBuffer();
+    try self.createIndexBuffer();
     try self.createCommandBuffers();
     try self.createSyncObjects();
 }
@@ -184,6 +191,9 @@ fn cleanupSwapChain(self: *@This(), allocator: std.mem.Allocator) void {
 
 fn cleanup(self: *@This(), allocator: std.mem.Allocator) !void {
     self.cleanupSwapChain(allocator);
+
+    c.vkDestroyBuffer(self.device, self.indexBuffer, null);
+    c.vkFreeMemory(self.device, self.indexBufferMemory, null);
 
     c.vkDestroyBuffer(self.device, self.vertexBuffer, null);
     c.vkFreeMemory(self.device, self.vertexBufferMemory, null);
@@ -907,6 +917,44 @@ fn createCommandPool(self: *@This(), allocator: std.mem.Allocator) !void {
     if (c.vkCreateCommandPool(self.device, &poolInfo, null, &self.commandPool) != c.VK_SUCCESS) return error.VulkanCommandPoolCreationFailed;
 }
 
+fn createVertexBuffer(self: *@This()) !void {
+    const bufferSize: c.VkDeviceSize = @intCast(@sizeOf(Vertex) * vertices.len);
+
+    var stagingBuffer: c.VkBuffer = undefined;
+    var stagingBufferMemory: c.VkDeviceMemory = undefined;
+    try self.createBuffer(bufferSize, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuffer, &stagingBufferMemory);
+
+    var data: ?*anyopaque = undefined;
+    if (c.vkMapMemory(self.device, stagingBufferMemory, 0, bufferSize, 0, &data) != c.VK_SUCCESS) return error.VulkanVertexBufferMemoryMappingFailed;
+    @memcpy(@as([*]u8, @ptrCast(data.?))[0..bufferSize], std.mem.sliceAsBytes(&vertices));
+    c.vkUnmapMemory(self.device, stagingBufferMemory);
+
+    try self.createBuffer(bufferSize, c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &self.vertexBuffer, &self.vertexBufferMemory);
+    try self.copyBuffer(stagingBuffer, self.vertexBuffer, bufferSize);
+
+    c.vkDestroyBuffer(self.device, stagingBuffer, null);
+    c.vkFreeMemory(self.device, stagingBufferMemory, null);
+}
+
+fn createIndexBuffer(self: *@This()) !void {
+    const bufferSize: c.VkDeviceSize = @intCast(@sizeOf(u16) * _indices.len);
+
+    var stagingBuffer: c.VkBuffer = undefined;
+    var stagingBufferMemory: c.VkDeviceMemory = undefined;
+    try self.createBuffer(bufferSize, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuffer, &stagingBufferMemory);
+
+    var data: ?*anyopaque = undefined;
+    if (c.vkMapMemory(self.device, stagingBufferMemory, 0, bufferSize, 0, &data) != c.VK_SUCCESS) return error.VulkanVertexBufferMemoryMappingFailed;
+    @memcpy(@as([*]u8, @ptrCast(data.?))[0..bufferSize], std.mem.sliceAsBytes(&_indices));
+    c.vkUnmapMemory(self.device, stagingBufferMemory);
+
+    try self.createBuffer(bufferSize, c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &self.indexBuffer, &self.indexBufferMemory);
+    try self.copyBuffer(stagingBuffer, self.indexBuffer, bufferSize);
+
+    c.vkDestroyBuffer(self.device, stagingBuffer, null);
+    c.vkFreeMemory(self.device, stagingBufferMemory, null);
+}
+
 fn createBuffer(self: *@This(), size: c.VkDeviceSize, usage: c.VkBufferUsageFlags, properties: c.VkMemoryPropertyFlags, buffer: *c.VkBuffer, bufferMemory: *c.VkDeviceMemory) !void {
     const bufferInfo = c.VkBufferCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -931,25 +979,6 @@ fn createBuffer(self: *@This(), size: c.VkDeviceSize, usage: c.VkBufferUsageFlag
 
     if (c.vkAllocateMemory(self.device, &allocInfo, null, bufferMemory) != c.VK_SUCCESS) return error.VulkanBufferMemoryAllocationFailed;
     if (c.vkBindBufferMemory(self.device, buffer.*, bufferMemory.*, 0) != c.VK_SUCCESS) return error.VulkanBufferMemoryBindingFailed;
-}
-
-fn createVertexBuffer(self: *@This()) !void {
-    const bufferSize: c.VkDeviceSize = @intCast(@sizeOf(Vertex) * vertices.len);
-
-    var stagingBuffer: c.VkBuffer = undefined;
-    var stagingBufferMemory: c.VkDeviceMemory = undefined;
-    try self.createBuffer(bufferSize, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuffer, &stagingBufferMemory);
-
-    var data: ?*anyopaque = undefined;
-    if (c.vkMapMemory(self.device, stagingBufferMemory, 0, bufferSize, 0, &data) != c.VK_SUCCESS) return error.VulkanVertexBufferMemoryMappingFailed;
-    @memcpy(@as([*]u8, @ptrCast(data.?))[0..bufferSize], std.mem.sliceAsBytes(&vertices));
-    c.vkUnmapMemory(self.device, stagingBufferMemory);
-
-    try self.createBuffer(bufferSize, c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &self.vertexBuffer, &self.vertexBufferMemory);
-    try self.copyBuffer(stagingBuffer, self.vertexBuffer, bufferSize);
-
-    c.vkDestroyBuffer(self.device, stagingBuffer, null);
-    c.vkFreeMemory(self.device, stagingBufferMemory, null);
 }
 
 fn findMemoryType(self: *@This(), typeFilter: u32, properties: c.VkMemoryPropertyFlags) !u32 {
@@ -1149,8 +1178,9 @@ fn recordCommandBuffer(self: *@This(), commandBuffer: c.VkCommandBuffer, imageIn
     const vertexBuffers = [_]c.VkBuffer{self.vertexBuffer};
     const offsets = [_]c.VkDeviceSize{0};
     c.vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffers, &offsets);
+    c.vkCmdBindIndexBuffer(commandBuffer, self.indexBuffer, 0, c.VK_INDEX_TYPE_UINT16);
 
-    c.vkCmdDraw(commandBuffer, @intCast(vertices.len), 1, 0, 0);
+    c.vkCmdDrawIndexed(commandBuffer, @intCast(_indices.len), 1, 0, 0, 0);
 
     c.vkCmdEndRenderPass(commandBuffer);
 
