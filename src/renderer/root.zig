@@ -7,7 +7,7 @@ const HEIGHT = 600;
 
 const enableValidationLayers = std.debug.runtime_safety;
 const validationLayers = [_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
-const deviceExtensions = [_][*:0]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+const deviceExtensions = if (builtin.os.tag == .macos) [_][*:0]const u8{  "VK_KHR_portability_subset", c.VK_KHR_SWAPCHAIN_EXTENSION_NAME } else [_][*:0]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
 instance: c.VkInstance = undefined,
 debugMessenger: c.VkDebugUtilsMessengerEXT = undefined,
@@ -24,6 +24,7 @@ swapChainImageViews: []c.VkImageView = undefined,
 renderPass: c.VkRenderPass = undefined,
 pipelineLayout: c.VkPipelineLayout = undefined,
 graphicsPipeline: c.VkPipeline = undefined,
+swapChainFramebuffers: []c.VkFramebuffer = undefined,
 
 const QueueFamilyIndices = struct {
     graphicsFamily: ?u32 = null,
@@ -83,9 +84,14 @@ fn initVulkan(self: *@This(), allocator: std.mem.Allocator, window: *c.GLFWwindo
     try self.createImageViews(allocator);
     try self.createRenderPass();
     try self.createGraphicsPipeline();
+    try self.createFramebuffers(allocator);
 }
 
 fn cleanup(self: *@This(), allocator: std.mem.Allocator) !void {
+    for (self.swapChainFramebuffers) |framebuffer|
+        c.vkDestroyFramebuffer(self.device, framebuffer, null);
+    allocator.free(self.swapChainFramebuffers);
+
     c.vkDestroyPipeline(self.device, self.graphicsPipeline, null);
     c.vkDestroyPipelineLayout(self.device, self.pipelineLayout, null);
     c.vkDestroyRenderPass(self.device, self.renderPass, null);
@@ -174,7 +180,7 @@ fn getRequiredExtensions(allocator: std.mem.Allocator) ![][*]const u8 {
     try extensions.appendSlice(glfwExtensions[0..glfwExtensionCount]);
 
     if (builtin.os.tag == .macos)
-        try extensions.append(c.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+        try extensions.appendSlice(&.{ c.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME, c.VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME });
 
     if (enableValidationLayers)
         try extensions.append(c.VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -216,7 +222,7 @@ fn debugCallback(
     _ = messageType;
     _ = pUserData;
 
-    std.log.info("Validation layer: {s}\n", .{pCallbackData.*.pMessage});
+    std.debug.print("{s}\n\n", .{pCallbackData.*.pMessage});
 
     return c.VK_FALSE;
 }
@@ -749,4 +755,27 @@ fn createShaderModule(self: *@This(), code: []align(@alignOf(u32)) const u8) !c.
     if (c.vkCreateShaderModule(self.device, &createInfo, null, &shaderModule) != c.VK_SUCCESS) return error.VulkanShaderModuleCreationFailed;
 
     return shaderModule;
+}
+
+fn createFramebuffers(self: *@This(), allocator: std.mem.Allocator) !void {
+    self.swapChainFramebuffers = try allocator.alloc(c.VkFramebuffer, self.swapChainImageViews.len);
+    errdefer allocator.free(self.swapChainFramebuffers);
+
+    for (self.swapChainImageViews, 0..) |imageView, i| {
+        const attachments = [_]c.VkImageView{imageView};
+
+        const framebufferInfo = c.VkFramebufferCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = self.renderPass,
+            .attachmentCount = @intCast(attachments.len),
+            .pAttachments = &attachments,
+            .width = self.swapChainExtent.width,
+            .height = self.swapChainExtent.height,
+            .layers = 1,
+            .pNext = null,
+            .flags = 0,
+        };
+
+        if (c.vkCreateFramebuffer(self.device, &framebufferInfo, null, &self.swapChainFramebuffers[i]) != c.VK_SUCCESS) return error.VulkanFramebufferCreationFailed;
+    }
 }
