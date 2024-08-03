@@ -95,12 +95,12 @@ fn initWindow(self: *@This()) !void {
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
 
     self.window = c.glfwCreateWindow(WIDTH, HEIGHT, "zminecraft", null, null) orelse return error.GlfwWindowCreationFailed;
-    // c.glfwSetWindowUserPointer(self.window, self);
-    // if (c.glfwSetFramebufferSizeCallback(self.window, framebufferResizeCallback) == null) return error.GlfwSetFramebufferSizeCallbackFailed;
+    c.glfwSetWindowUserPointer(self.window, self);
+    _ = c.glfwSetFramebufferSizeCallback(self.window, framebufferResizeCallback);
 }
 
 fn framebufferResizeCallback(window: ?*c.GLFWwindow, _: c_int, _: c_int) callconv(.C) void {
-    var self: *@This() = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(window)));
+    var self: *@This() = @ptrCast(@alignCast(c.glfwGetWindowUserPointer(window)));
     self.framebufferResized = true;
 }
 
