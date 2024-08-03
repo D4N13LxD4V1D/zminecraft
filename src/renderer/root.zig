@@ -630,8 +630,8 @@ fn createGraphicsPipeline(self: *@This()) !void {
     const viewport = c.VkViewport{
         .x = 0.0,
         .y = 0.0,
-        .width = @intCast(self.swapChainExtent.width),
-        .height = @intCast(self.swapChainExtent.height),
+        .width = @floatFromInt(self.swapChainExtent.width),
+        .height = @floatFromInt(self.swapChainExtent.height),
         .minDepth = 0.0,
         .maxDepth = 1.0,
     };
@@ -727,13 +727,13 @@ fn createGraphicsPipeline(self: *@This()) !void {
         .layout = self.pipelineLayout,
         .renderPass = self.renderPass,
         .subpass = 0,
-        .basePipelineHandle = c.VK_NULL_HANDLE,
+        .basePipelineHandle = null,
         .basePipelineIndex = -1,
         .pNext = null,
         .flags = 0,
     };
 
-    if (c.vkCreateGraphicsPipelines(self.device, c.VK_NULL_HANDLE, 1, &pipelineInfo, null, &self.graphicsPipeline) != c.VK_SUCCESS) return error.VulkanGraphicsPipelineCreationFailed;
+    if (c.vkCreateGraphicsPipelines(self.device, null, 1, &pipelineInfo, null, &self.graphicsPipeline) != c.VK_SUCCESS) return error.VulkanGraphicsPipelineCreationFailed;
 }
 
 fn createShaderModule(self: *@This(), code: []align(@alignOf(u32)) const u8) !c.VkShaderModule {
