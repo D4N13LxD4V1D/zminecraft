@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
+
 const c = @import("c.zig").c;
+const zlm = @import("zlm.zig");
 
 const WIDTH = 800;
 const HEIGHT = 600;
@@ -49,8 +51,8 @@ const SwapChainSupportDetails = struct {
 };
 
 const Vertex = struct {
-    pos: @Vector(2, f32),
-    color: @Vector(3, f32),
+    pos: zlm.Vec2,
+    color: zlm.Vec3,
 
     pub fn getBindingDescription() c.VkVertexInputBindingDescription {
         return c.VkVertexInputBindingDescription{
@@ -78,14 +80,22 @@ const Vertex = struct {
     }
 };
 
+const UniformBufferObject = struct {
+    model: zlm.Mat4,
+    view: zlm.Mat4,
+    proj: zlm.Mat4,
+};
+
 const vertices = [_]Vertex{
-    Vertex{ .pos = @Vector(2, f32){ -0.5, -0.5 }, .color = @Vector(3, f32){ 1.0, 0.0, 0.0 } },
-    Vertex{ .pos = @Vector(2, f32){ 0.5, -0.5 }, .color = @Vector(3, f32){ 0.0, 1.0, 0.0 } },
-    Vertex{ .pos = @Vector(2, f32){ 0.5, 0.5 }, .color = @Vector(3, f32){ 0.0, 0.0, 1.0 } },
-    Vertex{ .pos = @Vector(2, f32){ -0.5, 0.5 }, .color = @Vector(3, f32){ 1.0, 1.0, 1.0 } },
+    .{ .pos = .{ -0.5, -0.5 }, .color = .{ 1.0, 0.0, 0.0 } },
+    .{ .pos = .{ 0.5, -0.5 }, .color = .{ 0.0, 1.0, 0.0 } },
+    .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0.0, 0.0, 1.0 } },
+    .{ .pos = .{ -0.5, 0.5 }, .color = .{ 1.0, 1.0, 1.0 } },
 };
 
 const _indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
+
+allocator: std.mem.Allocator = undefined,
 
 window: *c.GLFWwindow = undefined,
 
@@ -107,14 +117,21 @@ swapChainImageViews: []c.VkImageView = undefined,
 swapChainFramebuffers: []c.VkFramebuffer = undefined,
 
 renderPass: c.VkRenderPass = undefined,
+descriptorSetLayout: c.VkDescriptorSetLayout = undefined,
 pipelineLayout: c.VkPipelineLayout = undefined,
 graphicsPipeline: c.VkPipeline = undefined,
 
 vertexBuffer: c.VkBuffer = undefined,
 vertexBufferMemory: c.VkDeviceMemory = undefined,
-
 indexBuffer: c.VkBuffer = undefined,
 indexBufferMemory: c.VkDeviceMemory = undefined,
+
+uniformBuffers: [MAX_FRAMES_IN_FLIGHT]c.VkBuffer = undefined,
+uniformBuffersMemory: [MAX_FRAMES_IN_FLIGHT]c.VkDeviceMemory = undefined,
+uniformBuffersData: [MAX_FRAMES_IN_FLIGHT]?*anyopaque = undefined,
+
+descriptorPool: c.VkDescriptorPool = undefined,
+descriptorSets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet = undefined,
 
 commandPool: c.VkCommandPool = undefined,
 commandBuffers: [MAX_FRAMES_IN_FLIGHT]c.VkCommandBuffer = undefined,
@@ -126,12 +143,20 @@ currentFrame: u32 = 0,
 
 framebufferResized: bool = false,
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var self: @This() = .{};
+startTime: std.time.Instant = undefined,
+
+pub fn init(allocator: std.mem.Allocator) !@This() {
+    return @This(){
+        .allocator = allocator,
+        .startTime = try std.time.Instant.now(),
+    };
+}
+
+pub fn run(self: *@This()) !void {
     try self.initWindow();
-    try self.initVulkan(allocator);
-    try self.mainLoop(allocator);
-    try self.cleanup(allocator);
+    try self.initVulkan();
+    try self.mainLoop();
+    try self.cleanup();
 }
 
 fn initWindow(self: *@This()) !void {
@@ -149,48 +174,61 @@ fn framebufferResizeCallback(window: ?*c.GLFWwindow, _: c_int, _: c_int) callcon
     self.framebufferResized = true;
 }
 
-fn initVulkan(self: *@This(), allocator: std.mem.Allocator) !void {
-    try self.createInstance(allocator);
+fn initVulkan(self: *@This()) !void {
+    try self.createInstance();
     try self.setupDebugMessenger();
     try self.createSurface();
-    try self.pickPhysicalDevice(allocator);
-    try self.createLogicalDevice(allocator);
-    try self.createSwapChain(allocator);
-    try self.createImageViews(allocator);
+    try self.pickPhysicalDevice();
+    try self.createLogicalDevice();
+    try self.createSwapChain();
+    try self.createImageViews();
     try self.createRenderPass();
+    try self.createDescriptorSetLayout();
     try self.createGraphicsPipeline();
-    try self.createFramebuffers(allocator);
-    try self.createCommandPool(allocator);
+    try self.createFramebuffers();
+    try self.createCommandPool();
     try self.createVertexBuffer();
     try self.createIndexBuffer();
+    try self.createUniformBuffers();
+    try self.createDescriptorPool();
+    try self.createDescriptorSets();
     try self.createCommandBuffers();
     try self.createSyncObjects();
 }
 
-fn mainLoop(self: *@This(), allocator: std.mem.Allocator) !void {
+fn mainLoop(self: *@This()) !void {
     while (c.glfwWindowShouldClose(self.window) == c.GLFW_FALSE) {
         c.glfwPollEvents();
-        try self.drawFrame(allocator);
+        try self.drawFrame();
     }
 
     if (c.vkDeviceWaitIdle(self.device) != c.VK_SUCCESS) return error.VulkanDeviceWaitIdleFailed;
 }
 
-fn cleanupSwapChain(self: *@This(), allocator: std.mem.Allocator) void {
+fn cleanupSwapChain(self: *@This()) void {
     for (self.swapChainFramebuffers) |framebuffer|
         c.vkDestroyFramebuffer(self.device, framebuffer, null);
-    allocator.free(self.swapChainFramebuffers);
+    self.allocator.free(self.swapChainFramebuffers);
 
     for (self.swapChainImageViews) |imageView|
         c.vkDestroyImageView(self.device, imageView, null);
-    allocator.free(self.swapChainImageViews);
+    self.allocator.free(self.swapChainImageViews);
 
     c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
-    allocator.free(self.swapChainImages);
+    self.allocator.free(self.swapChainImages);
 }
 
-fn cleanup(self: *@This(), allocator: std.mem.Allocator) !void {
-    self.cleanupSwapChain(allocator);
+fn cleanup(self: *@This()) !void {
+    self.cleanupSwapChain();
+
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        c.vkDestroyBuffer(self.device, self.uniformBuffers[i], null);
+        c.vkFreeMemory(self.device, self.uniformBuffersMemory[i], null);
+    }
+
+    c.vkDestroyDescriptorPool(self.device, self.descriptorPool, null);
+
+    c.vkDestroyDescriptorSetLayout(self.device, self.descriptorSetLayout, null);
 
     c.vkDestroyBuffer(self.device, self.indexBuffer, null);
     c.vkFreeMemory(self.device, self.indexBufferMemory, null);
@@ -223,7 +261,7 @@ fn cleanup(self: *@This(), allocator: std.mem.Allocator) !void {
     c.glfwTerminate();
 }
 
-fn recreateSwapChain(self: *@This(), allocator: std.mem.Allocator) !void {
+fn recreateSwapChain(self: *@This()) !void {
     var width: i32 = undefined;
     var height: i32 = undefined;
     c.glfwGetFramebufferSize(self.window, &width, &height);
@@ -235,15 +273,15 @@ fn recreateSwapChain(self: *@This(), allocator: std.mem.Allocator) !void {
 
     if (c.vkDeviceWaitIdle(self.device) != c.VK_SUCCESS) return error.VulkanDeviceWaitFailed;
 
-    self.cleanupSwapChain(allocator);
+    self.cleanupSwapChain();
 
-    try self.createSwapChain(allocator);
-    try self.createImageViews(allocator);
-    try self.createFramebuffers(allocator);
+    try self.createSwapChain();
+    try self.createImageViews();
+    try self.createFramebuffers();
 }
 
-fn createInstance(self: *@This(), allocator: std.mem.Allocator) !void {
-    if (enableValidationLayers and !(try checkValidationLayerSupport(allocator)))
+fn createInstance(self: *@This()) !void {
+    if (enableValidationLayers and !(try self.checkValidationLayerSupport()))
         return error.ValidationLayerRequestedButNotAvailable;
 
     const appInfo = c.VkApplicationInfo{
@@ -256,8 +294,8 @@ fn createInstance(self: *@This(), allocator: std.mem.Allocator) !void {
         .pNext = null,
     };
 
-    const extensions = try getRequiredExtensions(allocator);
-    defer allocator.free(extensions);
+    const extensions = try self.getRequiredExtensions();
+    defer self.allocator.free(extensions);
 
     var debugCreateInfo: c.VkDebugUtilsMessengerCreateInfoEXT = undefined;
     populateDebugMessengerCreateInfo(&debugCreateInfo);
@@ -276,12 +314,12 @@ fn createInstance(self: *@This(), allocator: std.mem.Allocator) !void {
     if (c.vkCreateInstance(&createInfo, null, &self.instance) != c.VK_SUCCESS) return error.VulkanInstanceCreationFailed;
 }
 
-fn checkValidationLayerSupport(allocator: std.mem.Allocator) !bool {
+fn checkValidationLayerSupport(self: *@This()) !bool {
     var layerCount: u32 = undefined;
     if (c.vkEnumerateInstanceLayerProperties(&layerCount, null) != c.VK_SUCCESS) return error.VulkanValidationLayerEnumerationFailed;
 
-    const availableLayers = try allocator.alloc(c.VkLayerProperties, layerCount);
-    defer allocator.free(availableLayers);
+    const availableLayers = try self.allocator.alloc(c.VkLayerProperties, layerCount);
+    defer self.allocator.free(availableLayers);
     if (c.vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.ptr) != c.VK_SUCCESS) return error.VulkanValidationLayerEnumerationFailed;
 
     for (validationLayers) |layerName| {
@@ -300,11 +338,11 @@ fn checkValidationLayerSupport(allocator: std.mem.Allocator) !bool {
     return true;
 }
 
-fn getRequiredExtensions(allocator: std.mem.Allocator) ![][*]const u8 {
+fn getRequiredExtensions(self: *@This()) ![][*]const u8 {
     var glfwExtensionCount: u32 = undefined;
     const glfwExtensions: [*]const [*]const u8 = @ptrCast(c.glfwGetRequiredInstanceExtensions(&glfwExtensionCount));
 
-    var extensions = std.ArrayList([*]const u8).init(allocator);
+    var extensions = std.ArrayList([*]const u8).init(self.allocator);
     errdefer extensions.deinit();
 
     try extensions.appendSlice(glfwExtensions[0..glfwExtensionCount]);
@@ -361,29 +399,29 @@ fn createSurface(self: *@This()) !void {
     if (c.glfwCreateWindowSurface(self.instance, self.window, null, &self.surface) != c.VK_SUCCESS) return error.FailedToCreateWindowSurface;
 }
 
-fn pickPhysicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
+fn pickPhysicalDevice(self: *@This()) !void {
     var physicalDeviceCount: u32 = undefined;
     if (c.vkEnumeratePhysicalDevices(self.instance, &physicalDeviceCount, null) != c.VK_SUCCESS) return error.VulkanPhysicalDeviceEnumerationFailed;
     if (physicalDeviceCount == 0) return error.VulkanNoPhysicalDevicesFound;
 
-    const physicalDevices = try allocator.alloc(c.VkPhysicalDevice, physicalDeviceCount);
-    defer allocator.free(physicalDevices);
+    const physicalDevices = try self.allocator.alloc(c.VkPhysicalDevice, physicalDeviceCount);
+    defer self.allocator.free(physicalDevices);
     if (c.vkEnumeratePhysicalDevices(self.instance, &physicalDeviceCount, physicalDevices.ptr) != c.VK_SUCCESS) return error.VulkanPhysicalDeviceEnumerationFailed;
 
     self.physicalDevice = for (physicalDevices) |device| {
-        if (try self.isDeviceSuitable(allocator, device)) {
+        if (try self.isDeviceSuitable(device)) {
             break device;
         }
     } else return error.VulkanNoSuitablePhysicalDeviceFound;
 }
 
-fn isDeviceSuitable(self: @This(), allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !bool {
-    const indices = try self.findQueueFamilies(allocator, device);
+fn isDeviceSuitable(self: *@This(), device: c.VkPhysicalDevice) !bool {
+    const indices = try self.findQueueFamilies(device);
 
-    const extensionsSupported = try checkDeviceExtensionSupport(allocator, device);
+    const extensionsSupported = try self.checkDeviceExtensionSupport(device);
 
     const swapChainAdequate = if (extensionsSupported) block: {
-        var swapChainSupport = try self.querySwapChainSupport(allocator, device);
+        var swapChainSupport = try self.querySwapChainSupport(device);
         defer swapChainSupport.deinit();
         break :block swapChainSupport.formats.items.len != 0 and swapChainSupport.presentModes.items.len != 0;
     } else false;
@@ -391,12 +429,12 @@ fn isDeviceSuitable(self: @This(), allocator: std.mem.Allocator, device: c.VkPhy
     return indices.isComplete() and extensionsSupported and swapChainAdequate;
 }
 
-fn findQueueFamilies(self: @This(), allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !QueueFamilyIndices {
+fn findQueueFamilies(self: @This(), device: c.VkPhysicalDevice) !QueueFamilyIndices {
     var queueFamilyCount: u32 = 0;
     c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, null);
 
-    const queueFamilies = try allocator.alloc(c.VkQueueFamilyProperties, queueFamilyCount);
-    defer allocator.free(queueFamilies);
+    const queueFamilies = try self.allocator.alloc(c.VkQueueFamilyProperties, queueFamilyCount);
+    defer self.allocator.free(queueFamilies);
     c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.ptr);
 
     var indices = QueueFamilyIndices{};
@@ -417,12 +455,12 @@ fn findQueueFamilies(self: @This(), allocator: std.mem.Allocator, device: c.VkPh
     return indices;
 }
 
-fn checkDeviceExtensionSupport(allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !bool {
+fn checkDeviceExtensionSupport(self: *@This(), device: c.VkPhysicalDevice) !bool {
     var extensionCount: u32 = undefined;
     if (c.vkEnumerateDeviceExtensionProperties(device, null, &extensionCount, null) != c.VK_SUCCESS) return error.VulkanDeviceExtensionEnumerationFailed;
 
-    const availableExtensions = try allocator.alloc(c.VkExtensionProperties, extensionCount);
-    defer allocator.free(availableExtensions);
+    const availableExtensions = try self.allocator.alloc(c.VkExtensionProperties, extensionCount);
+    defer self.allocator.free(availableExtensions);
 
     if (c.vkEnumerateDeviceExtensionProperties(device, null, &extensionCount, availableExtensions.ptr) != c.VK_SUCCESS) return error.VulkanDeviceExtensionEnumerationFailed;
 
@@ -430,22 +468,22 @@ fn checkDeviceExtensionSupport(allocator: std.mem.Allocator, device: c.VkPhysica
         [*:0]const u8,
         void,
         struct {
-            pub fn hash(_: @This(), self: [*:0]const u8) u64 {
+            pub fn hash(_: @This(), value: [*:0]const u8) u64 {
                 var h: u32 = 2166136261;
                 var i: usize = 0;
-                while (self[i] != 0) : (i += 1) {
-                    h ^= self[i];
+                while (value[i] != 0) : (i += 1) {
+                    h ^= value[i];
                     h *%= 16777619;
                 }
                 return h;
             }
 
-            pub fn eql(_: @This(), self: [*:0]const u8, other: [*:0]const u8) bool {
-                return std.mem.eql(u8, std.mem.span(self), std.mem.span(other));
+            pub fn eql(_: @This(), value: [*:0]const u8, other: [*:0]const u8) bool {
+                return std.mem.eql(u8, std.mem.span(value), std.mem.span(other));
             }
         },
         std.hash_map.default_max_load_percentage,
-    ).init(allocator);
+    ).init(self.allocator);
     defer requiredExtensions.deinit();
 
     for (deviceExtensions) |extension|
@@ -457,8 +495,8 @@ fn checkDeviceExtensionSupport(allocator: std.mem.Allocator, device: c.VkPhysica
     return requiredExtensions.count() == 0;
 }
 
-fn querySwapChainSupport(self: @This(), allocator: std.mem.Allocator, device: c.VkPhysicalDevice) !SwapChainSupportDetails {
-    var details = SwapChainSupportDetails.init(allocator);
+fn querySwapChainSupport(self: @This(), device: c.VkPhysicalDevice) !SwapChainSupportDetails {
+    var details = SwapChainSupportDetails.init(self.allocator);
     if (c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, self.surface, &details.capabilities) != c.VK_SUCCESS) return error.VulkanSurfaceCapabilitiesQueryFailed;
 
     var formatCount: u32 = undefined;
@@ -480,10 +518,10 @@ fn querySwapChainSupport(self: @This(), allocator: std.mem.Allocator, device: c.
     return details;
 }
 
-fn createLogicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
-    const indices = try self.findQueueFamilies(allocator, self.physicalDevice);
+fn createLogicalDevice(self: *@This()) !void {
+    const indices = try self.findQueueFamilies(self.physicalDevice);
 
-    var queueCreateInfos = std.ArrayList(c.VkDeviceQueueCreateInfo).init(allocator);
+    var queueCreateInfos = std.ArrayList(c.VkDeviceQueueCreateInfo).init(self.allocator);
     defer queueCreateInfos.deinit();
 
     const allQueueFamilies = [_]u32{ indices.graphicsFamily.?, indices.presentFamily.? };
@@ -524,8 +562,8 @@ fn createLogicalDevice(self: *@This(), allocator: std.mem.Allocator) !void {
     c.vkGetDeviceQueue(self.device, indices.presentFamily.?, 0, &self.presentQueue);
 }
 
-fn createSwapChain(self: *@This(), allocator: std.mem.Allocator) !void {
-    var swapChainSupport = try self.querySwapChainSupport(allocator, self.physicalDevice);
+fn createSwapChain(self: *@This()) !void {
+    var swapChainSupport = try self.querySwapChainSupport(self.physicalDevice);
     defer swapChainSupport.deinit();
 
     const surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats.items);
@@ -536,7 +574,7 @@ fn createSwapChain(self: *@This(), allocator: std.mem.Allocator) !void {
     if (swapChainSupport.capabilities.maxImageCount > 0 and imageCount > swapChainSupport.capabilities.maxImageCount)
         imageCount = swapChainSupport.capabilities.maxImageCount;
 
-    const indices = try self.findQueueFamilies(allocator, self.physicalDevice);
+    const indices = try self.findQueueFamilies(self.physicalDevice);
     const queueFamilyIndices = [_]u32{ indices.graphicsFamily.?, indices.presentFamily.? };
 
     const createInfo = c.VkSwapchainCreateInfoKHR{
@@ -564,8 +602,8 @@ fn createSwapChain(self: *@This(), allocator: std.mem.Allocator) !void {
 
     if (c.vkGetSwapchainImagesKHR(self.device, self.swapChain, &imageCount, null) != c.VK_SUCCESS) return error.VulkanSwapChainImageQueryFailed;
 
-    self.swapChainImages = try allocator.alloc(c.VkImage, imageCount);
-    errdefer allocator.free(self.swapChainImages);
+    self.swapChainImages = try self.allocator.alloc(c.VkImage, imageCount);
+    errdefer self.allocator.free(self.swapChainImages);
 
     if (c.vkGetSwapchainImagesKHR(self.device, self.swapChain, &imageCount, self.swapChainImages.ptr) != c.VK_SUCCESS) return error.VulkanSwapChainImageQueryFailed;
 
@@ -611,9 +649,9 @@ fn chooseSwapExtent(window: *c.GLFWwindow, capabilities: c.VkSurfaceCapabilities
     return actualExtent;
 }
 
-fn createImageViews(self: *@This(), allocator: std.mem.Allocator) !void {
-    self.swapChainImageViews = try allocator.alloc(c.VkImageView, self.swapChainImages.len);
-    errdefer allocator.free(self.swapChainImageViews);
+fn createImageViews(self: *@This()) !void {
+    self.swapChainImageViews = try self.allocator.alloc(c.VkImageView, self.swapChainImages.len);
+    errdefer self.allocator.free(self.swapChainImageViews);
 
     for (self.swapChainImages, 0..) |swapChainImage, i| {
         const createInfo = c.VkImageViewCreateInfo{
@@ -696,6 +734,26 @@ fn createRenderPass(self: *@This()) !void {
     };
 
     if (c.vkCreateRenderPass(self.device, &renderPassInfo, null, &self.renderPass) != c.VK_SUCCESS) return error.VulkanRenderPassCreationFailed;
+}
+
+fn createDescriptorSetLayout(self: *@This()) !void {
+    const uboLayoutBinding = c.VkDescriptorSetLayoutBinding{
+        .binding = 0,
+        .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
+        .pImmutableSamplers = null,
+    };
+
+    const layoutInfo = c.VkDescriptorSetLayoutCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings = &uboLayoutBinding,
+        .pNext = null,
+        .flags = 0,
+    };
+
+    if (c.vkCreateDescriptorSetLayout(self.device, &layoutInfo, null, &self.descriptorSetLayout) != c.VK_SUCCESS) return error.VulkanDescriptorSetLayoutCreationFailed;
 }
 
 fn createGraphicsPipeline(self: *@This()) !void {
@@ -788,7 +846,7 @@ fn createGraphicsPipeline(self: *@This()) !void {
         .polygonMode = c.VK_POLYGON_MODE_FILL,
         .lineWidth = 1.0,
         .cullMode = c.VK_CULL_MODE_BACK_BIT,
-        .frontFace = c.VK_FRONT_FACE_CLOCKWISE,
+        .frontFace = c.VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .depthBiasEnable = c.VK_FALSE,
         .depthBiasConstantFactor = 0.0,
         .depthBiasClamp = 0.0,
@@ -833,8 +891,8 @@ fn createGraphicsPipeline(self: *@This()) !void {
 
     const pipelineLayoutInfo = c.VkPipelineLayoutCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 0,
-        .pSetLayouts = null,
+        .setLayoutCount = 1,
+        .pSetLayouts = &self.descriptorSetLayout,
         .pushConstantRangeCount = 0,
         .pPushConstantRanges = null,
         .pNext = null,
@@ -881,9 +939,9 @@ fn createShaderModule(self: *@This(), code: []align(@alignOf(u32)) const u8) !c.
     return shaderModule;
 }
 
-fn createFramebuffers(self: *@This(), allocator: std.mem.Allocator) !void {
-    self.swapChainFramebuffers = try allocator.alloc(c.VkFramebuffer, self.swapChainImageViews.len);
-    errdefer allocator.free(self.swapChainFramebuffers);
+fn createFramebuffers(self: *@This()) !void {
+    self.swapChainFramebuffers = try self.allocator.alloc(c.VkFramebuffer, self.swapChainImageViews.len);
+    errdefer self.allocator.free(self.swapChainFramebuffers);
 
     for (self.swapChainImageViews, 0..) |imageView, i| {
         const attachments = [_]c.VkImageView{imageView};
@@ -904,8 +962,8 @@ fn createFramebuffers(self: *@This(), allocator: std.mem.Allocator) !void {
     }
 }
 
-fn createCommandPool(self: *@This(), allocator: std.mem.Allocator) !void {
-    const queueFamilyIndices = try self.findQueueFamilies(allocator, self.physicalDevice);
+fn createCommandPool(self: *@This()) !void {
+    const queueFamilyIndices = try self.findQueueFamilies(self.physicalDevice);
 
     const poolInfo = c.VkCommandPoolCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -1036,6 +1094,73 @@ fn copyBuffer(self: *@This(), srcBuffer: c.VkBuffer, dstBuffer: c.VkBuffer, size
     c.vkFreeCommandBuffers(self.device, self.commandPool, 1, &commandBuffer);
 }
 
+fn createUniformBuffers(self: *@This()) !void {
+    const bufferSize: c.VkDeviceSize = @intCast(@sizeOf(UniformBufferObject));
+
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        try self.createBuffer(bufferSize, c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &self.uniformBuffers[i], &self.uniformBuffersMemory[i]);
+        if (c.vkMapMemory(self.device, self.uniformBuffersMemory[i], 0, bufferSize, 0, &self.uniformBuffersData[i]) != c.VK_SUCCESS) return error.VulkanUniformBufferMemoryMappingFailed;
+    }
+}
+
+fn createDescriptorPool(self: *@This()) !void {
+    const poolSizes = c.VkDescriptorPoolSize{
+        .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = @intCast(MAX_FRAMES_IN_FLIGHT),
+    };
+
+    const poolInfo = c.VkDescriptorPoolCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .poolSizeCount = 1,
+        .pPoolSizes = &poolSizes,
+        .maxSets = @intCast(MAX_FRAMES_IN_FLIGHT),
+        .pNext = null,
+        .flags = 0,
+    };
+
+    if (c.vkCreateDescriptorPool(self.device, &poolInfo, null, &self.descriptorPool) != c.VK_SUCCESS) return error.VulkanDescriptorPoolCreationFailed;
+}
+
+fn createDescriptorSets(self: *@This()) !void {
+    var layouts: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSetLayout = undefined;
+
+    for (0..MAX_FRAMES_IN_FLIGHT) |i|
+        layouts[i] = self.descriptorSetLayout;
+
+    const allocInfo = c.VkDescriptorSetAllocateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = self.descriptorPool,
+        .descriptorSetCount = @intCast(MAX_FRAMES_IN_FLIGHT),
+        .pSetLayouts = &layouts,
+        .pNext = null,
+    };
+
+    if (c.vkAllocateDescriptorSets(self.device, &allocInfo, &self.descriptorSets) != c.VK_SUCCESS) return error.VulkanDescriptorSetAllocationFailed;
+
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        const bufferInfo = c.VkDescriptorBufferInfo{
+            .buffer = self.uniformBuffers[i],
+            .offset = 0,
+            .range = @intCast(@sizeOf(UniformBufferObject)),
+        };
+
+        const descriptorWrite = c.VkWriteDescriptorSet{
+            .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = self.descriptorSets[i],
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo = &bufferInfo,
+            .pImageInfo = null,
+            .pTexelBufferView = null,
+            .pNext = null,
+        };
+
+        c.vkUpdateDescriptorSets(self.device, 1, &descriptorWrite, 0, null);
+    }
+}
+
 fn createCommandBuffers(self: *@This()) !void {
     const allocInfo = c.VkCommandBufferAllocateInfo{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1068,16 +1193,18 @@ fn createSyncObjects(self: *@This()) !void {
     }
 }
 
-fn drawFrame(self: *@This(), allocator: std.mem.Allocator) !void {
+fn drawFrame(self: *@This()) !void {
     if (c.vkWaitForFences(self.device, 1, &self.inFlightFences[self.currentFrame], c.VK_TRUE, std.math.maxInt(u64)) != c.VK_SUCCESS) return error.VulkanFenceWaitFailed;
 
     var imageIndex: u32 = undefined;
     var result = c.vkAcquireNextImageKHR(self.device, self.swapChain, std.math.maxInt(u64), self.imageAvailableSemaphores[self.currentFrame], null, &imageIndex);
 
     if (result == c.VK_ERROR_OUT_OF_DATE_KHR) {
-        try self.recreateSwapChain(allocator);
+        try self.recreateSwapChain();
         return;
     } else if (result != c.VK_SUCCESS and result != c.VK_SUBOPTIMAL_KHR) return error.VulkanImageAcquisitionFailed;
+
+    try self.updateUniformBuffer(self.currentFrame);
 
     if (c.vkResetFences(self.device, 1, &self.inFlightFences[self.currentFrame]) != c.VK_SUCCESS) return error.VulkanFenceResetFailed;
     if (c.vkResetCommandBuffer(self.commandBuffers[self.currentFrame], 0) != c.VK_SUCCESS) return error.VulkanCommandBufferResetFailed;
@@ -1118,10 +1245,24 @@ fn drawFrame(self: *@This(), allocator: std.mem.Allocator) !void {
 
     if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR or self.framebufferResized) {
         self.framebufferResized = false;
-        try self.recreateSwapChain(allocator);
+        try self.recreateSwapChain();
     } else if (result != c.VK_SUCCESS) return error.VulkanQueuePresentationFailed;
 
     self.currentFrame = (self.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+}
+
+fn updateUniformBuffer(self: *@This(), currentImage: u32) !void {
+    const time: f32 = @as(f32, @floatFromInt((try std.time.Instant.now()).since(self.startTime))) / @as(f32, std.time.ns_per_s);
+
+    var ubo = UniformBufferObject{
+        .model = zlm.rotate(zlm.identity, time * std.math.degreesToRadians(90), .{ 0.0, 0.0, 1.0 }),
+        .view = zlm.lookAt(.{ 2.0, 2.0, 2.0 }, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 0.0, 1.0 }),
+        .proj = zlm.perspective(std.math.degreesToRadians(45.0), @as(f32, @floatFromInt(self.swapChainExtent.width)) / @as(f32, @floatFromInt(self.swapChainExtent.height)), 0.1, 10.0),
+    };
+
+    ubo.proj[1][1] *= -1.0;
+
+    @memcpy(@as([*]u8, @ptrCast(self.uniformBuffersData[currentImage].?))[0..@intCast(@sizeOf(UniformBufferObject))], std.mem.asBytes(&ubo));
 }
 
 fn recordCommandBuffer(self: *@This(), commandBuffer: c.VkCommandBuffer, imageIndex: u32) !void {
@@ -1179,6 +1320,8 @@ fn recordCommandBuffer(self: *@This(), commandBuffer: c.VkCommandBuffer, imageIn
     const offsets = [_]c.VkDeviceSize{0};
     c.vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffers, &offsets);
     c.vkCmdBindIndexBuffer(commandBuffer, self.indexBuffer, 0, c.VK_INDEX_TYPE_UINT16);
+
+    c.vkCmdBindDescriptorSets(commandBuffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipelineLayout, 0, 1, &self.descriptorSets[self.currentFrame], 0, null);
 
     c.vkCmdDrawIndexed(commandBuffer, @intCast(_indices.len), 1, 0, 0, 0);
 

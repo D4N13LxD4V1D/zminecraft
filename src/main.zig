@@ -6,5 +6,6 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() == .leak) @panic("Memory leak detected\n");
 
-    try renderer.run(gpa.allocator());
+    var app = try renderer.init(gpa.allocator());
+    try app.run();
 }
