@@ -48,6 +48,42 @@ const SwapChainSupportDetails = struct {
     }
 };
 
+const Vertex = struct {
+    pos: @Vector(2, f32),
+    color: @Vector(3, f32),
+
+    pub fn getBindingDescription() c.VkVertexInputBindingDescription {
+        return c.VkVertexInputBindingDescription{
+            .binding = 0,
+            .stride = @intCast(@sizeOf(Vertex)),
+            .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX,
+        };
+    }
+
+    pub fn getAttributeDescriptions() []const c.VkVertexInputAttributeDescription {
+        return &[2]c.VkVertexInputAttributeDescription{
+            c.VkVertexInputAttributeDescription{
+                .binding = 0,
+                .location = 0,
+                .format = c.VK_FORMAT_R32G32_SFLOAT,
+                .offset = @offsetOf(Vertex, "pos"),
+            },
+            c.VkVertexInputAttributeDescription{
+                .binding = 0,
+                .location = 1,
+                .format = c.VK_FORMAT_R32G32B32_SFLOAT,
+                .offset = @offsetOf(Vertex, "color"),
+            },
+        };
+    }
+};
+
+const vertices = [_]Vertex{
+    Vertex{ .pos = @Vector(2, f32){ 0.0, -0.5 }, .color = @Vector(3, f32){ 1.0, 1.0, 1.0 } },
+    Vertex{ .pos = @Vector(2, f32){ 0.5, 0.5 }, .color = @Vector(3, f32){ 0.0, 1.0, 0.0 } },
+    Vertex{ .pos = @Vector(2, f32){ -0.5, 0.5 }, .color = @Vector(3, f32){ 0.0, 0.0, 1.0 } },
+};
+
 window: *c.GLFWwindow = undefined,
 
 instance: c.VkInstance = undefined,
@@ -70,6 +106,9 @@ swapChainFramebuffers: []c.VkFramebuffer = undefined,
 renderPass: c.VkRenderPass = undefined,
 pipelineLayout: c.VkPipelineLayout = undefined,
 graphicsPipeline: c.VkPipeline = undefined,
+
+vertexBuffer: c.VkBuffer = undefined,
+vertexBufferMemory: c.VkDeviceMemory = undefined,
 
 commandPool: c.VkCommandPool = undefined,
 commandBuffers: [MAX_FRAMES_IN_FLIGHT]c.VkCommandBuffer = undefined,
@@ -116,6 +155,7 @@ fn initVulkan(self: *@This(), allocator: std.mem.Allocator) !void {
     try self.createGraphicsPipeline();
     try self.createFramebuffers(allocator);
     try self.createCommandPool(allocator);
+    try self.createVertexBuffer();
     try self.createCommandBuffers();
     try self.createSyncObjects();
 }
@@ -144,6 +184,9 @@ fn cleanupSwapChain(self: *@This(), allocator: std.mem.Allocator) void {
 
 fn cleanup(self: *@This(), allocator: std.mem.Allocator) !void {
     self.cleanupSwapChain(allocator);
+
+    c.vkDestroyBuffer(self.device, self.vertexBuffer, null);
+    c.vkFreeMemory(self.device, self.vertexBufferMemory, null);
 
     c.vkDestroyPipeline(self.device, self.graphicsPipeline, null);
     c.vkDestroyPipelineLayout(self.device, self.pipelineLayout, null);
@@ -677,12 +720,15 @@ fn createGraphicsPipeline(self: *@This()) !void {
 
     const shaderStages = [_]c.VkPipelineShaderStageCreateInfo{ vertShaderStageInfo, fragShaderStageInfo };
 
+    const bindingDescription = Vertex.getBindingDescription();
+    const attributeDescriptions = Vertex.getAttributeDescriptions();
+
     const vertexInputInfo = c.VkPipelineVertexInputStateCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = 0,
-        .pVertexBindingDescriptions = null,
-        .vertexAttributeDescriptionCount = 0,
-        .pVertexAttributeDescriptions = null,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &bindingDescription,
+        .vertexAttributeDescriptionCount = @intCast(attributeDescriptions.len),
+        .pVertexAttributeDescriptions = attributeDescriptions.ptr,
         .pNext = null,
         .flags = 0,
     };
@@ -861,6 +907,50 @@ fn createCommandPool(self: *@This(), allocator: std.mem.Allocator) !void {
     if (c.vkCreateCommandPool(self.device, &poolInfo, null, &self.commandPool) != c.VK_SUCCESS) return error.VulkanCommandPoolCreationFailed;
 }
 
+fn createVertexBuffer(self: *@This()) !void {
+    const bufferInfo = c.VkBufferCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = @intCast(@sizeOf(Vertex) * vertices.len),
+        .usage = c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+        .pNext = null,
+        .flags = 0,
+    };
+
+    if (c.vkCreateBuffer(self.device, &bufferInfo, null, &self.vertexBuffer) != c.VK_SUCCESS) return error.VulkanVertexBufferCreationFailed;
+
+    var memRequirements: c.VkMemoryRequirements = undefined;
+    c.vkGetBufferMemoryRequirements(self.device, self.vertexBuffer, &memRequirements);
+
+    const allocInfo = c.VkMemoryAllocateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = try self.findMemoryType(memRequirements.memoryTypeBits, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+        .pNext = null,
+    };
+
+    if (c.vkAllocateMemory(self.device, &allocInfo, null, &self.vertexBufferMemory) != c.VK_SUCCESS) return error.VulkanVertexBufferMemoryAllocationFailed;
+
+    if (c.vkBindBufferMemory(self.device, self.vertexBuffer, self.vertexBufferMemory, 0) != c.VK_SUCCESS) return error.VulkanVertexBufferMemoryBindingFailed;
+
+    var data: ?*anyopaque = undefined;
+    if (c.vkMapMemory(self.device, self.vertexBufferMemory, 0, @intCast(allocInfo.allocationSize), 0, &data) != c.VK_SUCCESS) return error.VulkanVertexBufferMemoryMappingFailed;
+    std.mem.copyForwards(u8, @as([*]u8, @ptrCast(data.?))[0..bufferInfo.size], std.mem.sliceAsBytes(&vertices));
+    c.vkUnmapMemory(self.device, self.vertexBufferMemory);
+}
+
+fn findMemoryType(self: *@This(), typeFilter: u32, properties: c.VkMemoryPropertyFlags) !u32 {
+    var memProperties: c.VkPhysicalDeviceMemoryProperties = undefined;
+    c.vkGetPhysicalDeviceMemoryProperties(self.physicalDevice, &memProperties);
+
+    for (0..memProperties.memoryTypeCount) |i| {
+        if (typeFilter & (@as(u32, 1) << @truncate(i)) != 0 and (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+            return @truncate(i);
+    }
+
+    return error.VulkanMemoryTypeNotFound;
+}
+
 fn createCommandBuffers(self: *@This()) !void {
     const allocInfo = c.VkCommandBufferAllocateInfo{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1000,7 +1090,11 @@ fn recordCommandBuffer(self: *@This(), commandBuffer: c.VkCommandBuffer, imageIn
     };
     c.vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    c.vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    const vertexBuffers = [_]c.VkBuffer{self.vertexBuffer};
+    const offsets = [_]c.VkDeviceSize{0};
+    c.vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffers, &offsets);
+
+    c.vkCmdDraw(commandBuffer, @intCast(vertices.len), 1, 0, 0);
 
     c.vkCmdEndRenderPass(commandBuffer);
 
