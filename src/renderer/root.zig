@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const c = @import("c.zig").c;
-const zlm = @import("zlm.zig");
+const vkm = @import("vkm.zig");
 
 const WIDTH = 800;
 const HEIGHT = 600;
@@ -51,8 +51,9 @@ const SwapChainSupportDetails = struct {
 };
 
 const Vertex = struct {
-    pos: zlm.Vec2,
-    color: zlm.Vec3,
+    pos: vkm.Vec2,
+    color: vkm.Vec3,
+    texCoord: vkm.Vec2,
 
     pub fn getBindingDescription() c.VkVertexInputBindingDescription {
         return c.VkVertexInputBindingDescription{
@@ -63,34 +64,40 @@ const Vertex = struct {
     }
 
     pub fn getAttributeDescriptions() []const c.VkVertexInputAttributeDescription {
-        return &[2]c.VkVertexInputAttributeDescription{
-            c.VkVertexInputAttributeDescription{
+        return &[_]c.VkVertexInputAttributeDescription{
+            .{
                 .binding = 0,
                 .location = 0,
                 .format = c.VK_FORMAT_R32G32_SFLOAT,
                 .offset = @offsetOf(Vertex, "pos"),
             },
-            c.VkVertexInputAttributeDescription{
+            .{
                 .binding = 0,
                 .location = 1,
                 .format = c.VK_FORMAT_R32G32B32_SFLOAT,
                 .offset = @offsetOf(Vertex, "color"),
+            },
+            .{
+                .binding = 0,
+                .location = 2,
+                .format = c.VK_FORMAT_R32G32_SFLOAT,
+                .offset = @offsetOf(Vertex, "texCoord"),
             },
         };
     }
 };
 
 const UniformBufferObject = struct {
-    model: zlm.Mat4,
-    view: zlm.Mat4,
-    proj: zlm.Mat4,
+    model: vkm.Mat4,
+    view: vkm.Mat4,
+    proj: vkm.Mat4,
 };
 
 const vertices = [_]Vertex{
-    .{ .pos = .{ -0.5, -0.5 }, .color = .{ 1.0, 0.0, 0.0 } },
-    .{ .pos = .{ 0.5, -0.5 }, .color = .{ 0.0, 1.0, 0.0 } },
-    .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0.0, 0.0, 1.0 } },
-    .{ .pos = .{ -0.5, 0.5 }, .color = .{ 1.0, 1.0, 1.0 } },
+    .{ .pos = .{ -0.5, -0.5 }, .color = .{ 1.0, 0.0, 0.0 }, .texCoord = .{ 1.0, 0.0 } },
+    .{ .pos = .{ 0.5, -0.5 }, .color = .{ 0.0, 1.0, 0.0 }, .texCoord = .{ 0.0, 0.0 } },
+    .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0.0, 0.0, 1.0 }, .texCoord = .{ 0.0, 1.0 } },
+    .{ .pos = .{ -0.5, 0.5 }, .color = .{ 1.0, 1.0, 1.0 }, .texCoord = .{ 1.0, 1.0 } },
 };
 
 const _indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
@@ -121,6 +128,13 @@ descriptorSetLayout: c.VkDescriptorSetLayout = undefined,
 pipelineLayout: c.VkPipelineLayout = undefined,
 graphicsPipeline: c.VkPipeline = undefined,
 
+commandPool: c.VkCommandPool = undefined,
+
+textureImage: c.VkImage = undefined,
+textureImageMemory: c.VkDeviceMemory = undefined,
+textureImageView: c.VkImageView = undefined,
+textureSampler: c.VkSampler = undefined,
+
 vertexBuffer: c.VkBuffer = undefined,
 vertexBufferMemory: c.VkDeviceMemory = undefined,
 indexBuffer: c.VkBuffer = undefined,
@@ -133,7 +147,6 @@ uniformBuffersData: [MAX_FRAMES_IN_FLIGHT]?*anyopaque = undefined,
 descriptorPool: c.VkDescriptorPool = undefined,
 descriptorSets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet = undefined,
 
-commandPool: c.VkCommandPool = undefined,
 commandBuffers: [MAX_FRAMES_IN_FLIGHT]c.VkCommandBuffer = undefined,
 
 imageAvailableSemaphores: [MAX_FRAMES_IN_FLIGHT]c.VkSemaphore = undefined,
@@ -187,6 +200,9 @@ fn initVulkan(self: *@This()) !void {
     try self.createGraphicsPipeline();
     try self.createFramebuffers();
     try self.createCommandPool();
+    try self.createTextureImage();
+    try self.createTextureImageView();
+    try self.createTextureSampler();
     try self.createVertexBuffer();
     try self.createIndexBuffer();
     try self.createUniformBuffers();
@@ -220,6 +236,12 @@ fn cleanupSwapChain(self: *@This()) void {
 
 fn cleanup(self: *@This()) !void {
     self.cleanupSwapChain();
+
+    c.vkDestroySampler(self.device, self.textureSampler, null);
+    c.vkDestroyImageView(self.device, self.textureImageView, null);
+
+    c.vkDestroyImage(self.device, self.textureImage, null);
+    c.vkFreeMemory(self.device, self.textureImageMemory, null);
 
     for (0..MAX_FRAMES_IN_FLIGHT) |i| {
         c.vkDestroyBuffer(self.device, self.uniformBuffers[i], null);
@@ -390,7 +412,7 @@ fn debugCallback(
     _ = messageType;
     _ = pUserData;
 
-    std.debug.print("{s}\n\n", .{pCallbackData.*.pMessage});
+    std.debug.print("{s}\n", .{pCallbackData.*.pMessage});
 
     return c.VK_FALSE;
 }
@@ -426,7 +448,10 @@ fn isDeviceSuitable(self: *@This(), device: c.VkPhysicalDevice) !bool {
         break :block swapChainSupport.formats.items.len != 0 and swapChainSupport.presentModes.items.len != 0;
     } else false;
 
-    return indices.isComplete() and extensionsSupported and swapChainAdequate;
+    var supportedFeatures: c.VkPhysicalDeviceFeatures = undefined;
+    c.vkGetPhysicalDeviceFeatures(device, &supportedFeatures);
+
+    return indices.isComplete() and extensionsSupported and swapChainAdequate and supportedFeatures.samplerAnisotropy == c.VK_TRUE;
 }
 
 fn findQueueFamilies(self: @This(), device: c.VkPhysicalDevice) !QueueFamilyIndices {
@@ -541,7 +566,9 @@ fn createLogicalDevice(self: *@This()) !void {
         try queueCreateInfos.append(queueCreateInfo);
     }
 
-    const deviceFeatures = c.VkPhysicalDeviceFeatures{};
+    const deviceFeatures = c.VkPhysicalDeviceFeatures{
+        .samplerAnisotropy = c.VK_TRUE,
+    };
 
     const createInfo = c.VkDeviceCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -649,35 +676,41 @@ fn chooseSwapExtent(window: *c.GLFWwindow, capabilities: c.VkSurfaceCapabilities
     return actualExtent;
 }
 
+fn createImageView(self: *@This(), image: c.VkImage, format: c.VkFormat) !c.VkImageView {
+    const viewInfo = c.VkImageViewCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = image,
+        .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+        .format = format,
+        .components = c.VkComponentMapping{
+            .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+            .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+            .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+            .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+        },
+        .subresourceRange = c.VkImageSubresourceRange{
+            .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .pNext = null,
+        .flags = 0,
+    };
+
+    var imageView: c.VkImageView = undefined;
+    if (c.vkCreateImageView(self.device, &viewInfo, null, &imageView) != c.VK_SUCCESS) return error.VulkanImageViewCreationFailed;
+
+    return imageView;
+}
+
 fn createImageViews(self: *@This()) !void {
     self.swapChainImageViews = try self.allocator.alloc(c.VkImageView, self.swapChainImages.len);
     errdefer self.allocator.free(self.swapChainImageViews);
 
-    for (self.swapChainImages, 0..) |swapChainImage, i| {
-        const createInfo = c.VkImageViewCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .image = swapChainImage,
-            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
-            .format = self.swapChainImageFormat,
-            .components = c.VkComponentMapping{
-                .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-            },
-            .subresourceRange = c.VkImageSubresourceRange{
-                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-            .pNext = null,
-            .flags = 0,
-        };
-
-        if (c.vkCreateImageView(self.device, &createInfo, null, &self.swapChainImageViews[i]) != c.VK_SUCCESS) return error.VulkanImageViewCreationFailed;
-    }
+    for (self.swapChainImages, 0..) |swapChainImage, i|
+        self.swapChainImageViews[i] = try self.createImageView(swapChainImage, self.swapChainImageFormat);
 }
 
 fn createRenderPass(self: *@This()) !void {
@@ -745,10 +778,20 @@ fn createDescriptorSetLayout(self: *@This()) !void {
         .pImmutableSamplers = null,
     };
 
+    const samplerLayoutBinding = c.VkDescriptorSetLayoutBinding{
+        .binding = 1,
+        .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+        .pImmutableSamplers = null,
+    };
+
+    const bindings = [_]c.VkDescriptorSetLayoutBinding{ uboLayoutBinding, samplerLayoutBinding };
+
     const layoutInfo = c.VkDescriptorSetLayoutCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings = &uboLayoutBinding,
+        .bindingCount = bindings.len,
+        .pBindings = &bindings,
         .pNext = null,
         .flags = 0,
     };
@@ -975,6 +1018,174 @@ fn createCommandPool(self: *@This()) !void {
     if (c.vkCreateCommandPool(self.device, &poolInfo, null, &self.commandPool) != c.VK_SUCCESS) return error.VulkanCommandPoolCreationFailed;
 }
 
+fn createImage(self: *@This(), width: u32, height: u32, format: c.VkFormat, tiling: c.VkImageTiling, usage: c.VkImageUsageFlags, properties: c.VkMemoryPropertyFlags, image: *c.VkImage, imageMemory: *c.VkDeviceMemory) !void {
+    const imageInfo = c.VkImageCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = c.VK_IMAGE_TYPE_2D,
+        .extent = c.VkExtent3D{
+            .width = width,
+            .height = height,
+            .depth = 1,
+        },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .format = format,
+        .tiling = tiling,
+        .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = usage,
+        .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+        .samples = c.VK_SAMPLE_COUNT_1_BIT,
+        .flags = 0,
+    };
+
+    if (c.vkCreateImage(self.device, &imageInfo, null, image) != c.VK_SUCCESS) return error.VulkanImageCreationFailed;
+
+    var memRequirements: c.VkMemoryRequirements = undefined;
+    c.vkGetImageMemoryRequirements(self.device, image.*, &memRequirements);
+
+    const allocInfo = c.VkMemoryAllocateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = try self.findMemoryType(memRequirements.memoryTypeBits, properties),
+        .pNext = null,
+    };
+
+    if (c.vkAllocateMemory(self.device, &allocInfo, null, imageMemory) != c.VK_SUCCESS) return error.VulkanImageMemoryAllocationFailed;
+
+    if (c.vkBindImageMemory(self.device, image.*, imageMemory.*, 0) != c.VK_SUCCESS) return error.VulkanImageMemoryBindingFailed;
+}
+
+fn createTextureImage(self: *@This()) !void {
+    var texWidth: c_int = undefined;
+    var texHeight: c_int = undefined;
+    var texChannels: c_int = undefined;
+
+    const pixels = c.stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, c.STBI_rgb_alpha) orelse return error.VulkanTextureImageLoadingFailed;
+    const imageSize: c.VkDeviceSize = @intCast(texWidth * texHeight * 4);
+
+    var stagingBuffer: c.VkBuffer = undefined;
+    var stagingBufferMemory: c.VkDeviceMemory = undefined;
+
+    try self.createBuffer(imageSize, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuffer, &stagingBufferMemory);
+    var data: ?*anyopaque = undefined;
+    if (c.vkMapMemory(self.device, stagingBufferMemory, 0, imageSize, 0, &data) != c.VK_SUCCESS) return error.VulkanTextureImageMemoryMappingFailed;
+
+    @memcpy(@as([*]u8, @ptrCast(data.?))[0..imageSize], pixels[0..imageSize]);
+    c.vkUnmapMemory(self.device, stagingBufferMemory);
+
+    c.stbi_image_free(pixels);
+
+    try self.createImage(@intCast(texWidth), @intCast(texHeight), c.VK_FORMAT_R8G8B8A8_SRGB, c.VK_IMAGE_TILING_OPTIMAL, c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &self.textureImage, &self.textureImageMemory);
+
+    try self.transitionLayoutImages(self.textureImage, c.VK_FORMAT_R8G8B8A8_SRGB, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    try self.copyBufferToImage(stagingBuffer, self.textureImage, @intCast(texWidth), @intCast(texHeight));
+    try self.transitionLayoutImages(self.textureImage, c.VK_FORMAT_R8G8B8A8_SRGB, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    c.vkDestroyBuffer(self.device, stagingBuffer, null);
+    c.vkFreeMemory(self.device, stagingBufferMemory, null);
+}
+
+fn transitionLayoutImages(self: @This(), image: c.VkImage, format: c.VkFormat, oldLayout: c.VkImageLayout, newLayout: c.VkImageLayout) !void {
+    const commandBuffer = try self.beginSingleTimeCommands();
+
+    _ = format;
+
+    var barrier = c.VkImageMemoryBarrier{
+        .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .oldLayout = oldLayout,
+        .newLayout = newLayout,
+        .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = c.VkImageSubresourceRange{
+            .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .srcAccessMask = 0,
+        .dstAccessMask = 0,
+    };
+
+    var sourceStage: c.VkPipelineStageFlags = undefined;
+    var destinationStage: c.VkPipelineStageFlags = undefined;
+
+    if (oldLayout == c.VK_IMAGE_LAYOUT_UNDEFINED and newLayout == c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        barrier.srcAccessMask = c.VK_ACCESS_NONE;
+        barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+
+        sourceStage = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        destinationStage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+    } else if (oldLayout == c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL and newLayout == c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+        sourceStage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+        destinationStage = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    } else {
+        return error.VulkanUnsupportedImageLayoutTransition;
+    }
+
+    c.vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, null, 0, null, 1, &barrier);
+
+    try self.endSingleTimeCommands(commandBuffer);
+}
+
+fn copyBufferToImage(self: *@This(), buffer: c.VkBuffer, image: c.VkImage, width: u32, height: u32) !void {
+    const commandBuffer = try self.beginSingleTimeCommands();
+
+    const region = c.VkBufferImageCopy{
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = c.VkImageSubresourceLayers{
+            .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .imageOffset = c.VkOffset3D{ .x = 0, .y = 0, .z = 0 },
+        .imageExtent = c.VkExtent3D{ .width = width, .height = height, .depth = 1 },
+    };
+
+    c.vkCmdCopyBufferToImage(commandBuffer, buffer, image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    try self.endSingleTimeCommands(commandBuffer);
+}
+
+fn createTextureImageView(self: *@This()) !void {
+    self.textureImageView = try self.createImageView(self.textureImage, c.VK_FORMAT_R8G8B8A8_SRGB);
+}
+
+fn createTextureSampler(self: *@This()) !void {
+    var properties = c.VkPhysicalDeviceProperties{};
+    c.vkGetPhysicalDeviceProperties(self.physicalDevice, &properties);
+
+    const samplerInfo = c.VkSamplerCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = c.VK_FILTER_LINEAR,
+        .minFilter = c.VK_FILTER_LINEAR,
+        .addressModeU = c.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = c.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = c.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .anisotropyEnable = c.VK_TRUE,
+        .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+        .borderColor = c.VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = c.VK_FALSE,
+        .compareEnable = c.VK_FALSE,
+        .compareOp = c.VK_COMPARE_OP_ALWAYS,
+        .mipmapMode = c.VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .mipLodBias = 0.0,
+        .minLod = 0.0,
+        .maxLod = 0.0,
+        .pNext = null,
+        .flags = 0,
+    };
+
+    if (c.vkCreateSampler(self.device, &samplerInfo, null, &self.textureSampler) != c.VK_SUCCESS) return error.VulkanTextureSamplerCreationFailed;
+}
+
 fn createVertexBuffer(self: *@This()) !void {
     const bufferSize: c.VkDeviceSize = @intCast(@sizeOf(Vertex) * vertices.len);
 
@@ -1051,7 +1262,7 @@ fn findMemoryType(self: *@This(), typeFilter: u32, properties: c.VkMemoryPropert
     return error.VulkanMemoryTypeNotFound;
 }
 
-fn copyBuffer(self: *@This(), srcBuffer: c.VkBuffer, dstBuffer: c.VkBuffer, size: c.VkDeviceSize) !void {
+fn beginSingleTimeCommands(self: @This()) !c.VkCommandBuffer {
     const allocInfo = c.VkCommandBufferAllocateInfo{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
@@ -1071,14 +1282,10 @@ fn copyBuffer(self: *@This(), srcBuffer: c.VkBuffer, dstBuffer: c.VkBuffer, size
 
     if (c.vkBeginCommandBuffer(commandBuffer, &beginInfo) != c.VK_SUCCESS) return error.VulkanCommandBufferBeginFailed;
 
-    const copyRegion = c.VkBufferCopy{
-        .srcOffset = 0,
-        .dstOffset = 0,
-        .size = size,
-    };
+    return commandBuffer;
+}
 
-    c.vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
-
+fn endSingleTimeCommands(self: @This(), commandBuffer: c.VkCommandBuffer) !void {
     if (c.vkEndCommandBuffer(commandBuffer) != c.VK_SUCCESS) return error.VulkanCommandBufferEndFailed;
 
     const submitInfo = c.VkSubmitInfo{
@@ -1094,6 +1301,20 @@ fn copyBuffer(self: *@This(), srcBuffer: c.VkBuffer, dstBuffer: c.VkBuffer, size
     c.vkFreeCommandBuffers(self.device, self.commandPool, 1, &commandBuffer);
 }
 
+fn copyBuffer(self: *@This(), srcBuffer: c.VkBuffer, dstBuffer: c.VkBuffer, size: c.VkDeviceSize) !void {
+    const commandBuffer = try self.beginSingleTimeCommands();
+
+    const copyRegion = c.VkBufferCopy{
+        .srcOffset = 0,
+        .dstOffset = 0,
+        .size = size,
+    };
+
+    c.vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+    try self.endSingleTimeCommands(commandBuffer);
+}
+
 fn createUniformBuffers(self: *@This()) !void {
     const bufferSize: c.VkDeviceSize = @intCast(@sizeOf(UniformBufferObject));
 
@@ -1104,14 +1325,17 @@ fn createUniformBuffers(self: *@This()) !void {
 }
 
 fn createDescriptorPool(self: *@This()) !void {
-    const poolSizes = c.VkDescriptorPoolSize{
+    const poolSizes = [_]c.VkDescriptorPoolSize{ .{
         .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
         .descriptorCount = @intCast(MAX_FRAMES_IN_FLIGHT),
-    };
+    }, .{
+        .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = @intCast(MAX_FRAMES_IN_FLIGHT),
+    } };
 
     const poolInfo = c.VkDescriptorPoolCreateInfo{
         .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .poolSizeCount = 1,
+        .poolSizeCount = poolSizes.len,
         .pPoolSizes = &poolSizes,
         .maxSets = @intCast(MAX_FRAMES_IN_FLIGHT),
         .pNext = null,
@@ -1144,20 +1368,40 @@ fn createDescriptorSets(self: *@This()) !void {
             .range = @intCast(@sizeOf(UniformBufferObject)),
         };
 
-        const descriptorWrite = c.VkWriteDescriptorSet{
-            .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = self.descriptorSets[i],
-            .dstBinding = 0,
-            .dstArrayElement = 0,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .pBufferInfo = &bufferInfo,
-            .pImageInfo = null,
-            .pTexelBufferView = null,
-            .pNext = null,
+        const imageInfo = c.VkDescriptorImageInfo{
+            .sampler = self.textureSampler,
+            .imageView = self.textureImageView,
+            .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
 
-        c.vkUpdateDescriptorSets(self.device, 1, &descriptorWrite, 0, null);
+        const descriptorWrites = [_]c.VkWriteDescriptorSet{
+            .{
+                .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = self.descriptorSets[i],
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .pBufferInfo = &bufferInfo,
+                .pImageInfo = null,
+                .pTexelBufferView = null,
+                .pNext = null,
+            },
+            .{
+                .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = self.descriptorSets[i],
+                .dstBinding = 1,
+                .dstArrayElement = 0,
+                .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .pBufferInfo = null,
+                .pImageInfo = &imageInfo,
+                .pTexelBufferView = null,
+                .pNext = null,
+            },
+        };
+
+        c.vkUpdateDescriptorSets(self.device, @intCast(descriptorWrites.len), &descriptorWrites, 0, null);
     }
 }
 
@@ -1255,9 +1499,9 @@ fn updateUniformBuffer(self: *@This(), currentImage: u32) !void {
     const time: f32 = @as(f32, @floatFromInt((try std.time.Instant.now()).since(self.startTime))) / @as(f32, std.time.ns_per_s);
 
     var ubo = UniformBufferObject{
-        .model = zlm.rotate(zlm.identity, time * std.math.degreesToRadians(90), .{ 0.0, 0.0, 1.0 }),
-        .view = zlm.lookAt(.{ 2.0, 2.0, 2.0 }, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 0.0, 1.0 }),
-        .proj = zlm.perspective(std.math.degreesToRadians(45.0), @as(f32, @floatFromInt(self.swapChainExtent.width)) / @as(f32, @floatFromInt(self.swapChainExtent.height)), 0.1, 10.0),
+        .model = vkm.rotate(vkm.identity, time * std.math.degreesToRadians(90), .{ 0.0, 0.0, 1.0 }),
+        .view = vkm.lookAt(.{ 2.0, 2.0, 2.0 }, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 0.0, 1.0 }),
+        .proj = vkm.perspective(std.math.degreesToRadians(45.0), @as(f32, @floatFromInt(self.swapChainExtent.width)) / @as(f32, @floatFromInt(self.swapChainExtent.height)), 0.1, 10.0),
     };
 
     ubo.proj[1][1] *= -1.0;

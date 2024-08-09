@@ -22,6 +22,10 @@ pub fn build(b: *std.Build) void {
     try addShader(b, renderer, "shader.vert", "vert.spv");
     try addShader(b, renderer, "shader.frag", "frag.spv");
 
+    renderer.addIncludePath(b.path("include"));
+    renderer.addCSourceFile(.{ .file = b.path("lib/stb_image.c") });
+    renderer.addAnonymousImport("textures/texture.jpg", .{ .root_source_file = b.path("textures/texture.jpg") });
+
     exe.root_module.addImport("renderer", renderer);
 
     b.installArtifact(exe);

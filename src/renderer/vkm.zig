@@ -30,7 +30,7 @@ pub fn dot(a: Vec3, b: Vec3) f32 {
 }
 
 pub fn normalize(a: Vec3) Vec3 {
-    const len = std.math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+    const len = @sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
     return .{ a[0] / len, a[1] / len, a[2] / len };
 }
 
@@ -66,8 +66,8 @@ pub const identity: Mat4 = .{
 };
 
 pub fn rotate(self: Mat4, angle: f32, axis: Vec3) Mat4 {
-    const c = std.math.cos(angle);
-    const s = std.math.sin(angle);
+    const c = @cos(angle);
+    const s = @sin(angle);
     const t = 1.0 - c;
     const x = axis[0];
     const y = axis[1];
@@ -95,7 +95,7 @@ pub fn lookAt(eye: Vec3, at: Vec3, up: Vec3) Mat4 {
 }
 
 pub fn perspective(fov: f32, aspect: f32, near: f32, far: f32) Mat4 {
-    const f = 1.0 / std.math.tan(fov / 2.0);
+    const f = 1.0 / @tan(fov / 2.0);
     return .{
         .{ f / aspect, 0.0, 0.0, 0.0 },
         .{ 0.0, f, 0.0, 0.0 },
