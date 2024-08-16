@@ -105,7 +105,7 @@ const vertices = [_]Vertex{
     .{ .pos = .{ -0.5, 0.5, -0.5 }, .color = .{ 1.0, 1.0, 1.0 }, .texCoord = .{ 1.0, 1.0 } },
 };
 
-const _indices = [_]u16{ 0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4 };
+const _indices = [_]u32{ 0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4 };
 
 allocator: std.mem.Allocator = undefined,
 
@@ -1288,7 +1288,7 @@ fn createVertexBuffer(self: *@This()) !void {
 }
 
 fn createIndexBuffer(self: *@This()) !void {
-    const bufferSize: c.VkDeviceSize = @intCast(@sizeOf(u16) * _indices.len);
+    const bufferSize: c.VkDeviceSize = @intCast(@sizeOf(@TypeOf(_indices[0])) * _indices.len);
 
     var stagingBuffer: c.VkBuffer = undefined;
     var stagingBufferMemory: c.VkDeviceMemory = undefined;
@@ -1651,7 +1651,7 @@ fn recordCommandBuffer(self: *@This(), commandBuffer: c.VkCommandBuffer, imageIn
     const vertexBuffers = [_]c.VkBuffer{self.vertexBuffer};
     const offsets = [_]c.VkDeviceSize{0};
     c.vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffers, &offsets);
-    c.vkCmdBindIndexBuffer(commandBuffer, self.indexBuffer, 0, c.VK_INDEX_TYPE_UINT16);
+    c.vkCmdBindIndexBuffer(commandBuffer, self.indexBuffer, 0, c.VK_INDEX_TYPE_UINT32);
 
     c.vkCmdBindDescriptorSets(commandBuffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipelineLayout, 0, 1, &self.descriptorSets[self.currentFrame], 0, null);
 
